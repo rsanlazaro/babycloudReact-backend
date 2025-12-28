@@ -1,8 +1,8 @@
+import 'dotenv/config';
 import session from 'express-session';
 import { RedisStore } from 'connect-redis';
 import { createClient } from 'redis';
 
-import dotenv from 'dotenv';
 import express from 'express';
 import cors from 'cors';
 
@@ -11,8 +11,6 @@ import uploadRoutes from './routes/upload.routes.js';
 import authRoutes from './routes/auth.routes.js';
 
 const app = express();
-
-dotenv.config();
 
 const isProduction = process.env.NODE_ENV === 'production';
 
@@ -61,8 +59,6 @@ app.use(
 );
 
 app.use((req, res, next) => {
-  console.log('GLOBAL COOKIE HEADER:', req.headers.cookie);
-  console.log('GLOBAL SESSION:', req.session);
   next();
 });
 

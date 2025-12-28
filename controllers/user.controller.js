@@ -1,10 +1,7 @@
-import express from 'express';
+import pool from '../db.js';
 
-const router = express.Router();
-
-router.get('/me', (req, res) => {
-
-  if (!req.session.user) {
+export const getMe = (req, res) => {
+  if (!req.session?.user) {
     return res.status(401).json({ message: 'Unauthorized' });
   }
 
@@ -13,23 +10,39 @@ router.get('/me', (req, res) => {
     username: req.session.user.username,
     profileImage: req.session.user.profileImage || null,
   });
-});
+};
 
-router.put('/profile-image', (req, res) => {
-
-  if (!req.session.user) {
+export const updateProfileImage = async (req, res) => {
+  if (!req.session?.user) {
     return res.status(401).json({ message: 'Unauthorized' });
   }
 
-  const { publicId, version } = req.body;
+  const userId = req.session.user.id;
+  const { profileUrl, publicId, version } = req.body;
 
-  const cloudName = process.env.CLOUDINARY_CLOUD_NAME;
-  const url = `https://res.cloudinary.com/${cloudName}/image/upload/v${version}/${publicId}.jpg`;
+  if (!profileUrl || !publicId || !version) {
+    return res.status(400).json({ message: 'Missing required fields' });
+  }
 
-  req.session.profileImage = { publicId, version, url };
-  req.session.user.profileImage = req.session.profileImage;
+  try {
+    // ✅ Update DB
+    await pool.query(
+      'UPDATE users SET profile_url = ? WHERE id = ?',
+      [profileUrl, userId]
+    );
 
-  res.json({ success: true });
-});
+    // ✅ Update session
+    const cloudName = process.env.CLOUDINARY_CLOUD_NAME;
+    const url = `https://res.cloudinary.com/${cloudName}/image/upload/v${version}/${publicId}.jpg`;
 
-export default router;
+    req.session.user.profileImage = { publicId, version, url };
+
+    // ✅ Persist session (important for Redis)
+    req.session.save(() => {
+      res.json({ success: true });
+    });
+  } catch (err) {
+    console.error('PROFILE IMAGE UPDATE ERROR:', err);
+    res.status(500).json({ message: 'Failed to update profile image' });
+  }
+};
