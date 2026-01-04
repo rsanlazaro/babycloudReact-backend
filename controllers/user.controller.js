@@ -187,40 +187,102 @@ export const getAllUsers = async (req, res) => {
   }
 };
 
-// Create new user
 export const createUser = async (req, res) => {
   if (!req.session?.user) {
     return res.status(401).json({ message: 'Unauthorized' });
   }
 
-  const { username, email, password, profile } = req.body;
+  const { username, email, password, profile = 'recluta' } = req.body;
 
   if (!username || !email || !password) {
-    return res.status(400).json({ message: 'Username, email, and password are required' });
+    return res.status(400).json({
+      message: 'Username, email, and password are required',
+    });
+  }
+
+  const allowedProfiles = [
+    'super_admin',
+    'admin_junior',
+    'coordinador',
+    'operador',
+    'recluta',
+  ];
+
+  if (!allowedProfiles.includes(profile)) {
+    return res.status(400).json({ message: 'Invalid profile' });
   }
 
   try {
-    // Check if username or email already exists
+    // 1️⃣ Check if user already exists
     const [existing] = await pool.query(
       'SELECT id FROM users WHERE username = ? OR mail = ?',
       [username, email]
     );
 
     if (existing.length > 0) {
-      return res.status(409).json({ message: 'El usuario o correo ya existe' });
+      return res.status(409).json({
+        message: 'El usuario o correo ya existe',
+      });
     }
 
-    // Insert new user (storing password as plain text for now)
-    const [result] = await pool.query(
-      `INSERT INTO users (username, mail, password, profile, enabled, created_on)
-       VALUES (?, ?, ?, ?, 1, NOW())`,
-      [username, email, password, profile || 'recluta']
+    // 2️⃣ Load access template for selected profile
+    const accessColumns = Array.from(
+      { length: 100 },
+      (_, i) => `${profile}_${i + 1}`
+    ).join(', ');
+
+    const [accessRows] = await pool.query(
+      `SELECT ${accessColumns} FROM access LIMIT 1`
     );
 
-    // Return the created user
+    if (accessRows.length === 0) {
+      return res.status(500).json({
+        message: 'Access profile configuration not found',
+      });
+    }
+
+    const accessValues = Object.values(accessRows[0]);
+
+    // 3️⃣ Build INSERT dynamically
+    const userAccessColumns = Array.from(
+      { length: 100 },
+      (_, i) => `access_${i + 1}`
+    ).join(', ');
+
+    const placeholders = Array(100).fill('?').join(', ');
+
+    const [result] = await pool.query(
+      `
+      INSERT INTO users (
+        username,
+        mail,
+        password,
+        profile,
+        enabled,
+        created_on,
+        ${userAccessColumns}
+      )
+      VALUES (
+        ?, ?, ?, ?, 1, NOW(),
+        ${placeholders}
+      )
+      `,
+      [username, email, password, profile, ...accessValues]
+    );
+
+    // 4️⃣ Return created user (without access flags)
     const [newUser] = await pool.query(
-      `SELECT id, username, mail as email, profile, created_on, enabled
-       FROM users WHERE id = ?`,
+      `
+      SELECT
+        id,
+        username,
+        mail AS email,
+        profile,
+        enabled,
+        created_on
+      FROM users
+      WHERE id = ?
+      `,
       [result.insertId]
     );
 
@@ -349,6 +411,103 @@ export const bulkDeleteUsers = async (req, res) => {
     res.json({ success: true, deleted: ids.length });
   } catch (err) {
     console.error('BULK DELETE USERS ERROR:', err);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
+
+// Get user roles/permissions
+export const getUserRoles = async (req, res) => {
+  if (!req.session?.user) {
+    return res.status(401).json({ message: 'Unauthorized' });
+  }
+
+  const { id } = req.params;
+
+  try {
+    // Build dynamic column selection for access_1 to access_82
+    const accessColumns = Array.from({ length: 82 }, (_, i) => `access_${i + 1}`).join(', ');
+
+    const [rows] = await pool.query(
+      `SELECT 
+        id,
+        username,
+        mail as email,
+        ${accessColumns}
+       FROM users
+       WHERE id = ?`,
+      [id]
+    );
+
+    if (rows.length === 0) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    const user = rows[0];
+
+    // Extract permissions
+    const permissions = {};
+    for (let i = 1; i <= 82; i++) {
+      permissions[`access_${i}`] = user[`access_${i}`] ?? 0;
+    }
+
+    res.json({
+      user: {
+        id: user.id,
+        username: user.username,
+        email: user.email,
+      },
+      permissions,
+    });
+  } catch (err) {
+    console.error('GET USER ROLES ERROR:', err);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
+
+// Update user roles/permissions
+export const updateUserRoles = async (req, res) => {
+  if (!req.session?.user) {
+    return res.status(401).json({ message: 'Unauthorized' });
+  }
+
+  const { id } = req.params;
+  const { permissions } = req.body;
+
+  if (!permissions || typeof permissions !== 'object') {
+    return res.status(400).json({ message: 'Invalid permissions data' });
+  }
+
+  try {
+    // Build dynamic update query
+    const updates = [];
+    const params = [];
+
+    for (let i = 1; i <= 82; i++) {
+      const key = `access_${i}`;
+      if (permissions[key] !== undefined) {
+        const value = parseInt(permissions[key], 10);
+        // Validate value is 0, 1, or 2
+        if ([0, 1, 2].includes(value)) {
+          updates.push(`${key} = ?`);
+          params.push(value);
+        }
+      }
+    }
+
+    if (updates.length === 0) {
+      return res.status(400).json({ message: 'No valid permissions to update' });
+    }
+
+    params.push(id);
+
+    await pool.query(
+      `UPDATE users SET ${updates.join(', ')} WHERE id = ?`,
+      params
+    );
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error('UPDATE USER ROLES ERROR:', err);
     res.status(500).json({ message: 'Server error' });
   }
 };

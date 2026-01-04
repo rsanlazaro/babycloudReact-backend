@@ -8,6 +8,8 @@ import {
   updateUser,
   deleteUser,
   bulkDeleteUsers,
+  getUserRoles,
+  updateUserRoles,
 } from '../controllers/user.controller.js';
 
 const router = express.Router();
@@ -23,5 +25,9 @@ router.post('/', createUser);
 router.put('/:id', updateUser);
 router.delete('/:id', deleteUser);
 router.post('/bulk-delete', bulkDeleteUsers);
+
+// User roles routes
+router.get('/:id/roles', getUserRoles);
+router.put('/:id/roles', updateUserRoles);
 
 export default router;
