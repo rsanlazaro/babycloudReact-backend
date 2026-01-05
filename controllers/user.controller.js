@@ -511,3 +511,102 @@ export const updateUserRoles = async (req, res) => {
     res.status(500).json({ message: 'Server error' });
   }
 };
+
+// Get all access permissions
+export const getAccessRoles = async (req, res) => {
+  if (!req.session?.user) {
+    return res.status(401).json({ message: 'Unauthorized' });
+  }
+
+  try {
+    // Build column list for all profiles (1-82)
+    const profiles = ['super_admin', 'admin_junior', 'coordinador', 'operador', 'recluta'];
+    const columns = [];
+
+    profiles.forEach((profile) => {
+      for (let i = 1; i <= 82; i++) {
+        columns.push(`${profile}_${i}`);
+      }
+    });
+
+    const [rows] = await pool.query(
+      `SELECT ${columns.join(', ')} FROM access LIMIT 1`
+    );
+
+    if (rows.length === 0) {
+      // Return default values if no row exists
+      const defaults = {};
+      columns.forEach((col) => {
+        defaults[col] = 0;
+      });
+      return res.json(defaults);
+    }
+
+    res.json(rows[0]);
+  } catch (err) {
+    console.error('GET ACCESS ROLES ERROR:', err);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
+
+// Update access permissions
+export const updateAccessRoles = async (req, res) => {
+  if (!req.session?.user) {
+    return res.status(401).json({ message: 'Unauthorized' });
+  }
+
+  const { permissions } = req.body;
+
+  if (!permissions || typeof permissions !== 'object') {
+    return res.status(400).json({ message: 'Invalid permissions data' });
+  }
+
+  try {
+    const profiles = ['super_admin', 'admin_junior', 'coordinador', 'operador', 'recluta'];
+    const updates = [];
+    const params = [];
+
+    profiles.forEach((profile) => {
+      for (let i = 1; i <= 82; i++) {
+        const key = `${profile}_${i}`;
+        if (permissions[key] !== undefined) {
+          const value = parseInt(permissions[key], 10);
+          // Validate value is 0, 1, or 2
+          if ([0, 1, 2].includes(value)) {
+            updates.push(`${key} = ?`);
+            params.push(value);
+          }
+        }
+      }
+    });
+
+    if (updates.length === 0) {
+      return res.status(400).json({ message: 'No valid permissions to update' });
+    }
+
+    // Check if row exists
+    const [existing] = await pool.query('SELECT COUNT(*) as count FROM access');
+
+    if (existing[0].count === 0) {
+      // Insert new row if none exists
+      const columns = updates.map((u) => u.split(' = ')[0]);
+      const placeholders = columns.map(() => '?').join(', ');
+
+      await pool.query(
+        `INSERT INTO access (${columns.join(', ')}) VALUES (${placeholders})`,
+        params
+      );
+    } else {
+      // Update existing row
+      await pool.query(
+        `UPDATE access SET ${updates.join(', ')} LIMIT 1`,
+        params
+      );
+    }
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error('UPDATE ACCESS ROLES ERROR:', err);
+    res.status(500).json({ message: 'Server error' });
+  }
+};

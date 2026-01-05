@@ -13,13 +13,19 @@ export const login = async (req, res) => {
 
   try {
     const [rows] = await pool.query(
-      'SELECT id, username, password, profile_url FROM users WHERE username = ?',
+      'SELECT id, username, password, profile_url, enabled FROM users WHERE username = ?',
       [username]
     );
 
     if (rows.length === 0) {
       return res.status(401).json({
         message: 'El usuario no coincide con la contraseña',
+      });
+    }
+
+    if (!rows[0].enabled) {
+      return res.status(403).json({
+        message: 'El usuario está deshabilitado',
       });
     }
 
