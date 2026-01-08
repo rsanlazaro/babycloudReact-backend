@@ -9,11 +9,11 @@ import cors from 'cors';
 import userRoutes from './routes/user.routes.js';
 import uploadRoutes from './routes/upload.routes.js';
 import authRoutes from './routes/auth.routes.js';
+import logsRoutes from './routes/logs.routes.js';
 
 const app = express();
 
 const isProduction = process.env.NODE_ENV === 'production';
-
 
 let store;
 
@@ -66,4 +66,5 @@ app.use((req, res, next) => {
 app.use('/api/users', userRoutes);
 app.use("/api/upload", uploadRoutes);
 app.use('/api/auth', authRoutes);
+app.use('/api/logs', logsRoutes);
 app.listen(4000, () => console.log("Server running"));

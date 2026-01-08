@@ -1,18 +1,23 @@
 import pool from '../db.js';
 
+// Update getMe to also return permissions
 export const getMe = async (req, res) => {
   if (!req.session?.user) {
     return res.status(401).json({ message: 'Unauthorized' });
   }
 
   try {
+    // Build dynamic column selection for access_1 to access_83
+    const accessColumns = Array.from({ length: 83 }, (_, i) => `access_${i + 1}`).join(', ');
+
     const [rows] = await pool.query(
       `SELECT 
         id,
         username,
         mail,
         profile,
-        profile_url
+        profile_url,
+        ${accessColumns}
        FROM users
        WHERE id = ?`,
       [req.session.user.id]
@@ -24,14 +29,21 @@ export const getMe = async (req, res) => {
 
     const user = rows[0];
 
+    // Extract permissions
+    const access = {};
+    for (let i = 1; i <= 83; i++) {
+      access[`access_${i}`] = user[`access_${i}`] ?? 0;
+    }
+
     res.json({
-      id: user.id,
-      username: user.username,
-      email: user.mail,
-      role: user.profile,
-      profileImage: user.profile_url
-        ? { url: user.profile_url }
-        : null,
+      user: {
+        id: user.id,
+        username: user.username,
+        email: user.mail,
+        role: user.profile,
+        profileImage: user.profile_url ? { url: user.profile_url } : null,
+      },
+      access, // Include permissions
     });
   } catch (err) {
     console.error('GET ME ERROR:', err);
@@ -52,19 +64,19 @@ export const updateProfileImage = async (req, res) => {
   }
 
   try {
-    // ✅ Update DB
+    // Update DB
     await pool.query(
       'UPDATE users SET profile_url = ? WHERE id = ?',
       [profileUrl, userId]
     );
 
-    // ✅ Update session
+    // Update session
     const cloudName = process.env.CLOUDINARY_CLOUD_NAME;
     const url = `https://res.cloudinary.com/${cloudName}/image/upload/v${version}/${publicId}.jpg`;
 
     req.session.user.profileImage = { publicId, version, url };
 
-    // ✅ Persist session (important for Redis)
+    // Persist session (important for Redis)
     req.session.save(() => {
       res.json({ success: true });
     });
@@ -213,7 +225,7 @@ export const createUser = async (req, res) => {
   }
 
   try {
-    // 1️⃣ Check if user already exists
+    // Check if user already exists
     const [existing] = await pool.query(
       'SELECT id FROM users WHERE username = ? OR mail = ?',
       [username, email]
@@ -225,7 +237,7 @@ export const createUser = async (req, res) => {
       });
     }
 
-    // 2️⃣ Load access template for selected profile
+    // Load access template for selected profile
     const accessColumns = Array.from(
       { length: 100 },
       (_, i) => `${profile}_${i + 1}`
@@ -243,7 +255,7 @@ export const createUser = async (req, res) => {
 
     const accessValues = Object.values(accessRows[0]);
 
-    // 3️⃣ Build INSERT dynamically
+    // Build INSERT dynamically
     const userAccessColumns = Array.from(
       { length: 100 },
       (_, i) => `access_${i + 1}`
@@ -270,7 +282,7 @@ export const createUser = async (req, res) => {
       [username, email, password, profile, ...accessValues]
     );
 
-    // 4️⃣ Return created user (without access flags)
+    // Return created user (without access flags)
     const [newUser] = await pool.query(
       `
       SELECT
@@ -424,8 +436,8 @@ export const getUserRoles = async (req, res) => {
   const { id } = req.params;
 
   try {
-    // Build dynamic column selection for access_1 to access_82
-    const accessColumns = Array.from({ length: 82 }, (_, i) => `access_${i + 1}`).join(', ');
+    // Build dynamic column selection for access_1 to access_83
+    const accessColumns = Array.from({ length: 83 }, (_, i) => `access_${i + 1}`).join(', ');
 
     const [rows] = await pool.query(
       `SELECT 
@@ -446,7 +458,7 @@ export const getUserRoles = async (req, res) => {
 
     // Extract permissions
     const permissions = {};
-    for (let i = 1; i <= 82; i++) {
+    for (let i = 1; i <= 83; i++) {
       permissions[`access_${i}`] = user[`access_${i}`] ?? 0;
     }
 
@@ -482,7 +494,7 @@ export const updateUserRoles = async (req, res) => {
     const updates = [];
     const params = [];
 
-    for (let i = 1; i <= 82; i++) {
+    for (let i = 1; i <= 83; i++) {
       const key = `access_${i}`;
       if (permissions[key] !== undefined) {
         const value = parseInt(permissions[key], 10);
@@ -519,12 +531,12 @@ export const getAccessRoles = async (req, res) => {
   }
 
   try {
-    // Build column list for all profiles (1-82)
+    // Build column list for all profiles (1-83)
     const profiles = ['super_admin', 'admin_junior', 'coordinador', 'operador', 'recluta'];
     const columns = [];
 
     profiles.forEach((profile) => {
-      for (let i = 1; i <= 82; i++) {
+      for (let i = 1; i <= 83; i++) {
         columns.push(`${profile}_${i}`);
       }
     });
@@ -567,7 +579,7 @@ export const updateAccessRoles = async (req, res) => {
     const params = [];
 
     profiles.forEach((profile) => {
-      for (let i = 1; i <= 82; i++) {
+      for (let i = 1; i <= 83; i++) {
         const key = `${profile}_${i}`;
         if (permissions[key] !== undefined) {
           const value = parseInt(permissions[key], 10);
