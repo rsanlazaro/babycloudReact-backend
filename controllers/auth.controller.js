@@ -95,6 +95,9 @@ export const login = async (req, res) => {
 };
 
 export const logout = async (req, res) => {
+  if (!req.session.user) {
+    return res.status(400).json({ message: 'User session not defined' });
+  }
   const { id, username } = req.session.user;
   logLogout(
     id,

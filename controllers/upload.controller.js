@@ -1,6 +1,7 @@
 import cloudinary from '../config/cloudinary.js';
+import { logActivity, logUpdate, logCreate, logDelete, logLogin, logLogout, ACTIVITY_TYPES, ENTITY_TYPES } from '../services/activityLogger.js';
 
-export const getUploadSignature = (req, res) => {
+export const getUploadSignature = async (req, res) => {
 
   try {
     if (!req.session || !req.session.user) {
@@ -29,6 +30,7 @@ export const getUploadSignature = (req, res) => {
       cloudName: process.env.CLOUDINARY_CLOUD_NAME,
       apiKey: process.env.CLOUDINARY_API_KEY,
     });
+
   } catch (err) {
     console.error('SIGNATURE ERROR STACK:', err);
     res.status(500).json({ message: 'Signature generation failed' });

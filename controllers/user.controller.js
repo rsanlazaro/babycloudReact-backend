@@ -1,4 +1,5 @@
 import pool from '../db.js';
+import { logActivity, logUpdate, logCreate, logDelete, logLogin, logLogout, ACTIVITY_TYPES, ENTITY_TYPES } from '../services/activityLogger.js';
 
 // Update getMe to also return permissions
 export const getMe = async (req, res) => {
@@ -52,6 +53,8 @@ export const getMe = async (req, res) => {
 };
 
 export const updateProfileImage = async (req, res) => {
+  const today = new Date();
+
   if (!req.session?.user) {
     return res.status(401).json({ message: 'Unauthorized' });
   }
@@ -80,6 +83,15 @@ export const updateProfileImage = async (req, res) => {
     req.session.save(() => {
       res.json({ success: true });
     });
+
+    await logUpdate(
+      userId,
+      'progestor',
+      `${req.session.user.username} actualizó su foto de perfil`,
+      today,
+      publicId,
+    );
+
   } catch (err) {
     console.error('PROFILE IMAGE UPDATE ERROR:', err);
     res.status(500).json({ message: 'Failed to update profile image' });
@@ -87,6 +99,7 @@ export const updateProfileImage = async (req, res) => {
 };
 
 export const updateProfile = async (req, res) => {
+  const today = new Date();
   if (!req.session?.user) {
     return res.status(401).json({ message: 'Unauthorized' });
   }
@@ -123,6 +136,7 @@ export const updateProfile = async (req, res) => {
     // Build update query dynamically based on whether password is provided
     let query;
     let params;
+    let metadata;
 
     if (password && password.trim() !== '') {
       // Hash the new password
@@ -135,6 +149,7 @@ export const updateProfile = async (req, res) => {
         WHERE id = ?
       `;
       params = [username, email, role, password, userId];
+      metadata = [email, password];
     } else {
       query = `
         UPDATE users 
@@ -142,9 +157,18 @@ export const updateProfile = async (req, res) => {
         WHERE id = ?
       `;
       params = [username, email, role, userId];
+      metadata = email;
     }
 
     await pool.query(query, params);
+
+    await logUpdate(
+      req.session.user.id,
+      'progestor',
+      `${req.session.user.username} actualizó sus datos`,
+      today,
+      metadata,
+    );
 
     // Update session with new data
     req.session.user.username = username;
@@ -167,6 +191,7 @@ export const updateProfile = async (req, res) => {
         },
       });
     });
+
   } catch (err) {
     console.error('PROFILE UPDATE ERROR:', err);
     res.status(500).json({ message: 'Failed to update profile' });
@@ -200,6 +225,7 @@ export const getAllUsers = async (req, res) => {
 };
 
 export const createUser = async (req, res) => {
+  const today = new Date();
   if (!req.session?.user) {
     return res.status(401).json({ message: 'Unauthorized' });
   }
@@ -282,6 +308,8 @@ export const createUser = async (req, res) => {
       [username, email, password, profile, ...accessValues]
     );
 
+    const metadata = [username, email, password, profile];
+
     // Return created user (without access flags)
     const [newUser] = await pool.query(
       `
@@ -298,6 +326,14 @@ export const createUser = async (req, res) => {
       [result.insertId]
     );
 
+    await logCreate(
+      req.session.user.id,
+      'progestor',
+      `${req.session.user.username} creó el usuario ${username}`,
+      today,
+      metadata,
+    );
+
     res.status(201).json(newUser[0]);
   } catch (err) {
     console.error('CREATE USER ERROR:', err);
@@ -311,6 +347,7 @@ export const updateUser = async (req, res) => {
     return res.status(401).json({ message: 'Unauthorized' });
   }
 
+  const today = new Date();
   const { id } = req.params;
   const { username, email, password, profile, enabled } = req.body;
 
@@ -372,6 +409,14 @@ export const updateUser = async (req, res) => {
       params
     );
 
+    await logUpdate(
+      req.session.user.id,
+      'progestor',
+      `${req.session.user.username} actualizó estos datos: [${params}]`,
+      today,
+      `${params}`,
+    );
+
     res.json({ success: true });
   } catch (err) {
     console.error('UPDATE USER ERROR:', err);
@@ -385,7 +430,24 @@ export const deleteUser = async (req, res) => {
     return res.status(401).json({ message: 'Unauthorized' });
   }
 
+  const today = new Date();
   const { id } = req.params;
+
+  const [DeletedRow] = await pool.query(
+    `
+      SELECT
+        username
+      FROM users
+      WHERE id = ?
+      `,
+    [id]
+  );
+
+  if (DeletedRow.length === 0) {
+    return res.status(404).json({ message: 'User not found' });
+  }
+
+  const username = DeletedRow[0].username;
 
   // Prevent self-deletion
   if (parseInt(id) === req.session.user.id) {
@@ -395,6 +457,13 @@ export const deleteUser = async (req, res) => {
   try {
     await pool.query('DELETE FROM users WHERE id = ?', [id]);
     res.json({ success: true });
+    await logDelete(
+      req.session.user.id,
+      'progestor',
+      `${req.session.user.username} eliminó al usuario ${username}`,
+      today,
+      `${id}`,
+    );
   } catch (err) {
     console.error('DELETE USER ERROR:', err);
     res.status(500).json({ message: 'Server error' });
@@ -408,6 +477,7 @@ export const bulkDeleteUsers = async (req, res) => {
   }
 
   const { ids } = req.body;
+  const today = new Date();
 
   if (!ids || !Array.isArray(ids) || ids.length === 0) {
     return res.status(400).json({ message: 'No user IDs provided' });
@@ -419,7 +489,20 @@ export const bulkDeleteUsers = async (req, res) => {
   }
 
   try {
+    const [rows] = await pool.query(
+      'SELECT username FROM users WHERE id IN (?)',
+      [ids]
+    );
+
+    const usernames = rows.map(r => r.username);
     await pool.query('DELETE FROM users WHERE id IN (?)', [ids]);
+    await logDelete(
+      req.session.user.id,
+      'progestor',
+      `${req.session.user.username} eliminó a los usuarios [${usernames}]`,
+      today,
+      `${ids}`,
+    );
     res.json({ success: true, deleted: ids.length });
   } catch (err) {
     console.error('BULK DELETE USERS ERROR:', err);
@@ -482,6 +565,7 @@ export const updateUserRoles = async (req, res) => {
     return res.status(401).json({ message: 'Unauthorized' });
   }
 
+  const today = new Date();
   const { id } = req.params;
   const { permissions } = req.body;
 
@@ -518,6 +602,27 @@ export const updateUserRoles = async (req, res) => {
     );
 
     res.json({ success: true });
+
+    const [modifiedUser] = await pool.query(
+      `SELECT 
+        username
+       FROM users
+       WHERE id = ?`,
+      [id]
+    );
+
+    if (modifiedUser.length === 0) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+    const user = modifiedUser[0].username;
+
+    await logUpdate(
+      req.session.user.id,
+      'progestor',
+      `${req.session.user.username} actualizó los permisos de ${user}`,
+      today,
+      `${params}`,
+    );
   } catch (err) {
     console.error('UPDATE USER ROLES ERROR:', err);
     res.status(500).json({ message: 'Server error' });
@@ -577,6 +682,8 @@ export const updateAccessRoles = async (req, res) => {
     const profiles = ['super_admin', 'admin_junior', 'coordinador', 'operador', 'recluta'];
     const updates = [];
     const params = [];
+    const updatedProfiles = [];
+    const today = new Date();
 
     profiles.forEach((profile) => {
       for (let i = 1; i <= 83; i++) {
@@ -587,6 +694,9 @@ export const updateAccessRoles = async (req, res) => {
           if ([0, 1, 2].includes(value)) {
             updates.push(`${key} = ?`);
             params.push(value);
+            if (!updatedProfiles.includes(profile)) {
+              updatedProfiles.push(profile);
+            }
           }
         }
       }
@@ -613,6 +723,14 @@ export const updateAccessRoles = async (req, res) => {
       await pool.query(
         `UPDATE access SET ${updates.join(', ')} LIMIT 1`,
         params
+      );
+
+      await logUpdate(
+        req.session.user.id,
+        'progestor',
+        `${req.session.user.username} actualizó los permisos de acceso generales de los perfiles`,
+        today,
+        ' ',
       );
     }
 
