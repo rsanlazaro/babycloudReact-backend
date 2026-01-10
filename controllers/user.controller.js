@@ -329,7 +329,7 @@ export const createUser = async (req, res) => {
     await logCreate(
       req.session.user.id,
       'progestor',
-      `${req.session.user.username} creó el usuario ${username}`,
+      `Creó el usuario ${username}`,
       today,
       metadata,
     );
@@ -409,10 +409,26 @@ export const updateUser = async (req, res) => {
       params
     );
 
+    const [UpdatedRow] = await pool.query(
+      `
+              SELECT
+                username
+              FROM users
+              WHERE id = ?
+              `,
+      id
+    );
+
+    if (UpdatedRow.length === 0) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    const updatedUsername = UpdatedRow[0].username;
+
     await logUpdate(
       req.session.user.id,
       'progestor',
-      `${req.session.user.username} actualizó estos datos: [${params}]`,
+      `Actualizó los datos del usuario ${updatedUsername}`,
       today,
       `${params}`,
     );
@@ -460,7 +476,7 @@ export const deleteUser = async (req, res) => {
     await logDelete(
       req.session.user.id,
       'progestor',
-      `${req.session.user.username} eliminó al usuario ${username}`,
+      `Eliminó al usuario ${username}`,
       today,
       `${id}`,
     );
@@ -499,7 +515,7 @@ export const bulkDeleteUsers = async (req, res) => {
     await logDelete(
       req.session.user.id,
       'progestor',
-      `${req.session.user.username} eliminó a los usuarios [${usernames}]`,
+      `Eliminó a los usuarios [${usernames}]`,
       today,
       `${ids}`,
     );
@@ -619,7 +635,7 @@ export const updateUserRoles = async (req, res) => {
     await logUpdate(
       req.session.user.id,
       'progestor',
-      `${req.session.user.username} actualizó los permisos de ${user}`,
+      `Actualizó los permisos de ${user}`,
       today,
       `${params}`,
     );
@@ -728,7 +744,7 @@ export const updateAccessRoles = async (req, res) => {
       await logUpdate(
         req.session.user.id,
         'progestor',
-        `${req.session.user.username} actualizó los permisos de acceso generales de los perfiles`,
+        `Actualizó los permisos de acceso generales de los perfiles`,
         today,
         ' ',
       );

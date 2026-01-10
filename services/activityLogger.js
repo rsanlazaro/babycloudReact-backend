@@ -72,7 +72,7 @@ export const logLogin = async (userId, username, created_at, metadata = null) =>
     userId,
     activityType: ACTIVITY_TYPES.LOGIN,
     entityType: ENTITY_TYPES.PROGESTOR,
-    description: `Usuario ${username} inició sesión`,
+    description: `Inició sesión`,
     created_at,
     metadata,
   });
@@ -86,7 +86,7 @@ export const logLogout = async (userId, username, created_at, metadata = null) =
     userId,
     activityType: ACTIVITY_TYPES.LOGOUT,
     entityType: ENTITY_TYPES.PROGESTOR,
-    description: `Usuario ${username} cerró sesión`,
+    description: `Cerró sesión`,
     created_at,
     metadata,
   });
