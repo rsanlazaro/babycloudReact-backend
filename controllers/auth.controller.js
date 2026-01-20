@@ -51,13 +51,28 @@ export const login = async (req, res) => {
       access[`access_${i}`] = user[`access_${i}`] ?? 0;
     }
 
-    // Create session
+    // ===== SPECIAL BUTTON ACCESS CONTROL =====
+    // Define allowed users for the special button (ONLY IN BACKEND)
+    const ALLOWED_USERS_FOR_BUTTON = [
+      'admin',
+      'john_doe',
+      'special_user',
+      // Add more usernames here as needed
+    ];
+
+    // Check if current user is in the allowed list
+    const hasSpecialButtonAccess = ALLOWED_USERS_FOR_BUTTON.includes(user.username);
+    // =========================================
+
+    // Create session with access permissions
     req.session.user = {
       id: user.id,
       username: user.username,
       email: user.mail,
       role: user.profile,
       profileImage: user.profile_url ? { url: user.profile_url } : null,
+      access, // Include access in session
+      hasSpecialButtonAccess, // Add special button permission
     };
 
     const metadata = user.email;
@@ -84,6 +99,7 @@ export const login = async (req, res) => {
           email: user.mail,
           role: user.profile,
           profileImage: user.profile_url ? { url: user.profile_url } : null,
+          hasSpecialButtonAccess, // Send permission to frontend
         },
         access, // { access_1: 1, access_2: 0, ... }
       });
@@ -114,4 +130,39 @@ export const logout = async (req, res) => {
     res.clearCookie('connect.sid');
     res.json({ success: true });
   });
+};
+
+export const verifySpecialAccess = async (req, res) => {
+  if (!req.session?.user) {
+    return res.status(401).json({ message: 'Unauthorized' });
+  }
+
+  const { password } = req.body;
+
+  if (!password) {
+    return res.status(400).json({ message: 'Contraseña es requerida' });
+  }
+
+  try {
+    // Define the shared password (ONLY IN BACKEND)
+    const SPECIAL_ACCESS_PASSWORD = 'adm@bbcloud'; // Change this!
+
+    // Verify the password
+    if (password === SPECIAL_ACCESS_PASSWORD) {
+      // Optional: Store in session that user has verified access
+      req.session.hasVerifiedSpecialAccess = true;
+      
+      return res.json({ 
+        success: true,
+        message: 'Acceso autorizado' 
+      });
+    } else {
+      return res.status(403).json({ 
+        message: 'Contraseña incorrecta' 
+      });
+    }
+  } catch (err) {
+    console.error('VERIFY SPECIAL ACCESS ERROR:', err);
+    res.status(500).json({ message: 'Error del servidor' });
+  }
 };

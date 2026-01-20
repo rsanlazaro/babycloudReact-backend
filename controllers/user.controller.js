@@ -36,6 +36,19 @@ export const getMe = async (req, res) => {
       access[`access_${i}`] = user[`access_${i}`] ?? 0;
     }
 
+    // ===== SPECIAL BUTTON ACCESS CONTROL =====
+    // Define allowed users for the special button (ONLY IN BACKEND)
+    const ALLOWED_USERS_FOR_BUTTON = [
+      'admin',
+      'john_doe',
+      'special_user',
+      // Add more usernames here as needed
+    ];
+
+    // Check if current user is in the allowed list
+    const hasSpecialButtonAccess = ALLOWED_USERS_FOR_BUTTON.includes(user.username);
+    // =========================================
+
     res.json({
       user: {
         id: user.id,
@@ -43,6 +56,7 @@ export const getMe = async (req, res) => {
         email: user.mail,
         role: user.profile,
         profileImage: user.profile_url ? { url: user.profile_url } : null,
+        hasSpecialButtonAccess, // Add special button permission
       },
       access, // Include permissions
     });
