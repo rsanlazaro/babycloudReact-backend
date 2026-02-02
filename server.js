@@ -11,6 +11,7 @@ import guestRoutes from './routes/guest.routes.js';
 import uploadRoutes from './routes/upload.routes.js';
 import authRoutes from './routes/auth.routes.js';
 import logsRoutes from './routes/logs.routes.js';
+import programRoutes from './routes/Programroutes.js';
 
 const app = express();
 
@@ -69,4 +70,5 @@ app.use('/api/guests', guestRoutes);
 app.use("/api/upload", uploadRoutes);
 app.use('/api/auth', authRoutes);
 app.use('/api/logs', logsRoutes);
+app.use('/api/programs', programRoutes);
 app.listen(4000, () => console.log("Server running"));
