@@ -54,6 +54,8 @@ export const login = async (req, res) => {
     // ===== SPECIAL BUTTON ACCESS CONTROL =====
     // Define allowed users for the special button (ONLY IN BACKEND)
     const ALLOWED_USERS_FOR_BUTTON = [
+      'admin',
+      'Gerencia_Jr',
       'AdminBabyCloud',
       'Junior',
       'Anthony',
