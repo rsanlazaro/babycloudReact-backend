@@ -5,13 +5,18 @@ import { createClient } from 'redis';
 
 import express from 'express';
 import cors from 'cors';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 import userRoutes from './routes/user.routes.js';
 import guestRoutes from './routes/guest.routes.js';
 import uploadRoutes from './routes/upload.routes.js';
 import authRoutes from './routes/auth.routes.js';
 import logsRoutes from './routes/logs.routes.js';
-import programRoutes from './routes/Programroutes.js';
+import programRoutes from './routes/program.routes.js';
 
 const app = express();
 
@@ -71,4 +76,13 @@ app.use("/api/upload", uploadRoutes);
 app.use('/api/auth', authRoutes);
 app.use('/api/logs', logsRoutes);
 app.use('/api/programs', programRoutes);
+
+// Serve static files from React build
+app.use(express.static(path.join(__dirname, 'build')));
+
+// Handle React routing - return index.html for all non-API routes
+app.get('*', (req, res) => {
+  res.sendFile(path.join(__dirname, 'build', 'index.html'));
+});
+
 app.listen(4000, () => console.log("Server running"));
