@@ -111,7 +111,7 @@ export const getAll = async (req, res) => {
     //    The values are already sanitized integers so this is safe.
     const [rows] = await pool.execute(
       `SELECT id, gesca, ip, country, scheme_value, status, manager,
-              ayuda_maternidad, ayuda_amount, row_states, created_at, updated_at
+              ayuda_maternidad, ayuda_amount, row_states, puerperio_states, created_at, updated_at
        FROM payments_gest
        ${whereClause}
        ORDER BY created_at DESC
