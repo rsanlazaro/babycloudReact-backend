@@ -17,6 +17,7 @@ import uploadRoutes from './routes/upload.routes.js';
 import authRoutes from './routes/auth.routes.js';
 import logsRoutes from './routes/logs.routes.js';
 import programRoutes from './routes/program.routes.js';
+import paymentsGestRoutes from './routes/paymentsGest.routes.js';
 
 const app = express();
 
@@ -76,6 +77,7 @@ app.use("/api/upload", uploadRoutes);
 app.use('/api/auth', authRoutes);
 app.use('/api/logs', logsRoutes);
 app.use('/api/programs', programRoutes);
+app.use('/api/payments-gest', paymentsGestRoutes);
 
 // Serve static files from React build
 app.use(express.static(path.join(__dirname, 'build')));
