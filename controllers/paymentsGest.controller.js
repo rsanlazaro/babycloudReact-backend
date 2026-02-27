@@ -14,6 +14,7 @@ const JSON_FIELDS = [
   'puerperio_states',
   'bono_states',
   'bg_conditions',
+  'bg_state',
   'parc_completed',
   'extrato_gastos',
   'ayuda_state',
@@ -21,7 +22,6 @@ const JSON_FIELDS = [
 
 /**
  * Scalar fields that map directly to columns.
- * scheme_value is handled separately (numeric coercion).
  */
 const SCALAR_FIELDS = [
   'gesca', 'ip', 'banco', 'clabe', 'country',
@@ -34,7 +34,6 @@ const SCALAR_FIELDS = [
 
 /**
  * Build the column-value map for INSERT / UPDATE from a request body.
- * JSON fields are stringified; scalar fields are passed through.
  */
 function buildColumnMap(body) {
   const cols = {};
@@ -65,13 +64,12 @@ function parseRow(row) {
       try {
         parsed[f] = typeof parsed[f] === 'string'
           ? JSON.parse(parsed[f])
-          : parsed[f]; // mysql2 may already parse JSON columns
+          : parsed[f];
       } catch {
         // leave as-is if parse fails
       }
     }
   });
-  // Convert tinyint booleans
   ['bono_vih', 'bono_gemelar', 'ayuda_maternidad'].forEach(f => {
     if (f in parsed) parsed[f] = Boolean(parsed[f]);
   });
@@ -80,13 +78,12 @@ function parseRow(row) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // GET  /api/payments-gest
-// Returns paginated list (id, gesca, ip, scheme_value, status, created_at)
-// Query params: page, limit, status, gesca, ip
 // ─────────────────────────────────────────────────────────────────────────────
 export const getAll = async (req, res) => {
   try {
-    const page   = Math.max(1, parseInt(req.query.page)  || 1);
-    const limit  = Math.min(100, parseInt(req.query.limit) || 20);
+    // Parse and sanitize pagination — must be integers for mysql2 prepared stmts
+    const page   = Math.max(1,   parseInt(req.query.page,  10) || 1);
+    const limit  = Math.min(100, parseInt(req.query.limit, 10) || 20);
     const offset = (page - 1) * limit;
 
     const where  = [];
@@ -107,14 +104,19 @@ export const getAll = async (req, res) => {
 
     const whereClause = where.length ? `WHERE ${where.join(' AND ')}` : '';
 
+    // ── FIX: inline LIMIT/OFFSET as integers directly in the SQL string.
+    //    mysql2's pool.execute() (prepared statements) mishandles LIMIT/OFFSET
+    //    when passed as bound parameters alongside other params on some MySQL
+    //    server versions — causes ER_WRONG_ARGUMENTS.
+    //    The values are already sanitized integers so this is safe.
     const [rows] = await pool.execute(
       `SELECT id, gesca, ip, country, scheme_value, status, manager,
-              ayuda_maternidad, ayuda_amount, created_at, updated_at
+              ayuda_maternidad, ayuda_amount, row_states, created_at, updated_at
        FROM payments_gest
        ${whereClause}
        ORDER BY created_at DESC
-       LIMIT ? OFFSET ?`,
-      [...params, limit, offset]
+       LIMIT ${limit} OFFSET ${offset}`,
+      params   // only the WHERE clause params remain as bound parameters
     );
 
     const [[{ total }]] = await pool.execute(
@@ -123,22 +125,21 @@ export const getAll = async (req, res) => {
     );
 
     res.json({
-      data:       rows,
+      data:       rows.map(parseRow),
       pagination: { page, limit, total, pages: Math.ceil(total / limit) },
     });
   } catch (err) {
     console.error('[paymentsGest] getAll error:', err);
     console.error('Error stack:', err.stack);
-    res.status(500).json({ 
+    res.status(500).json({
       message: 'Error al obtener los esquemas de pago',
-      error: process.env.NODE_ENV === 'development' ? err.message : undefined
+      error: process.env.NODE_ENV === 'development' ? err.message : undefined,
     });
   }
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
 // GET  /api/payments-gest/:id
-// Returns full record with all JSON fields parsed
 // ─────────────────────────────────────────────────────────────────────────────
 export const getById = async (req, res) => {
   try {
@@ -157,22 +158,20 @@ export const getById = async (req, res) => {
   } catch (err) {
     console.error('[paymentsGest] getById error:', err);
     console.error('Error stack:', err.stack);
-    res.status(500).json({ 
+    res.status(500).json({
       message: 'Error al obtener el esquema de pago',
-      error: process.env.NODE_ENV === 'development' ? err.message : undefined
+      error: process.env.NODE_ENV === 'development' ? err.message : undefined,
     });
   }
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
 // POST /api/payments-gest
-// Creates a new payment scheme
 // ─────────────────────────────────────────────────────────────────────────────
 export const create = async (req, res) => {
   try {
     const body = req.body;
 
-    // Validate required fields
     if (!body.gesca || !body.ip) {
       return res.status(400).json({ message: 'gesca e ip son obligatorios' });
     }
@@ -192,7 +191,6 @@ export const create = async (req, res) => {
       values
     );
 
-    // Return the newly created row
     const [newRows] = await pool.execute(
       'SELECT * FROM payments_gest WHERE id = ?',
       [result.insertId]
@@ -202,23 +200,21 @@ export const create = async (req, res) => {
   } catch (err) {
     console.error('[paymentsGest] create error:', err);
     console.error('Error stack:', err.stack);
-    res.status(500).json({ 
+    res.status(500).json({
       message: 'Error al crear el esquema de pago',
-      error: process.env.NODE_ENV === 'development' ? err.message : undefined
+      error: process.env.NODE_ENV === 'development' ? err.message : undefined,
     });
   }
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PUT  /api/payments-gest/:id
-// Full update of an existing record
 // ─────────────────────────────────────────────────────────────────────────────
 export const update = async (req, res) => {
   try {
     const { id } = req.params;
     const body = req.body;
 
-    // Confirm record exists
     const [existing] = await pool.execute(
       'SELECT id FROM payments_gest WHERE id = ?',
       [id]
@@ -250,16 +246,15 @@ export const update = async (req, res) => {
   } catch (err) {
     console.error('[paymentsGest] update error:', err);
     console.error('Error stack:', err.stack);
-    res.status(500).json({ 
+    res.status(500).json({
       message: 'Error al actualizar el esquema de pago',
-      error: process.env.NODE_ENV === 'development' ? err.message : undefined
+      error: process.env.NODE_ENV === 'development' ? err.message : undefined,
     });
   }
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
 // DELETE /api/payments-gest/:id
-// Hard delete — consider soft delete (status = 'cancelled') for production
 // ─────────────────────────────────────────────────────────────────────────────
 export const remove = async (req, res) => {
   try {
@@ -279,16 +274,15 @@ export const remove = async (req, res) => {
   } catch (err) {
     console.error('[paymentsGest] remove error:', err);
     console.error('Error stack:', err.stack);
-    res.status(500).json({ 
+    res.status(500).json({
       message: 'Error al eliminar el esquema de pago',
-      error: process.env.NODE_ENV === 'development' ? err.message : undefined
+      error: process.env.NODE_ENV === 'development' ? err.message : undefined,
     });
   }
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PATCH /api/payments-gest/:id/status
-// Quick status update without touching the full payload
 // ─────────────────────────────────────────────────────────────────────────────
 export const updateStatus = async (req, res) => {
   try {
@@ -317,9 +311,9 @@ export const updateStatus = async (req, res) => {
   } catch (err) {
     console.error('[paymentsGest] updateStatus error:', err);
     console.error('Error stack:', err.stack);
-    res.status(500).json({ 
+    res.status(500).json({
       message: 'Error al actualizar el status',
-      error: process.env.NODE_ENV === 'development' ? err.message : undefined
+      error: process.env.NODE_ENV === 'development' ? err.message : undefined,
     });
   }
 };
