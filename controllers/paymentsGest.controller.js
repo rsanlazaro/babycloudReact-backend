@@ -18,6 +18,7 @@ const JSON_FIELDS = [
   'parc_completed',
   'extrato_gastos',
   'ayuda_state',
+  'row_comments',
 ];
 
 /**
