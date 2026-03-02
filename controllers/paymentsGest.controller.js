@@ -16,6 +16,7 @@ const JSON_FIELDS = [
   'bg_conditions',
   'bg_state',
   'parc_completed',
+  'parc_real_amounts',
   'extrato_gastos',
   'ayuda_state',
   'row_comments',
@@ -31,6 +32,7 @@ const SCALAR_FIELDS = [
   'bono_vih', 'bono_gemelar',
   'parc_count',
   'ayuda_maternidad', 'ayuda_amount',
+  'semana_parto',
 ];
 
 /**
