@@ -1,3 +1,5 @@
+// backend/routes/paymentsGest.routes.js
+
 import express from 'express';
 import { getAll, create, getById, update, remove, updateStatus } from '../controllers/paymentsGest.controller.js';
 
