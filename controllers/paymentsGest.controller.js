@@ -86,7 +86,7 @@ export const getAll = async (req, res) => {
   try {
     // Parse and sanitize pagination — must be integers for mysql2 prepared stmts
     const page   = Math.max(1,   parseInt(req.query.page,  10) || 1);
-    const limit  = Math.min(100, parseInt(req.query.limit, 10) || 20);
+    const limit  = Math.min(100, parseInt(req.query.limit, 10) || 10000000000);
     const offset = (page - 1) * limit;
 
     const where  = [];
