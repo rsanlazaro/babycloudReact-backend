@@ -85,11 +85,11 @@ function parseRow(row) {
 export const getAll = async (req, res) => {
   try {
     // Parse and sanitize pagination — must be integers for mysql2 prepared stmts
-    const page   = Math.max(1,   parseInt(req.query.page,  10) || 1);
-    const limit  = Math.min(100, parseInt(req.query.limit, 10) || 10000000000);
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const limit = Math.min(100, parseInt(req.query.limit, 10) || 10000000000);
     const offset = (page - 1) * limit;
 
-    const where  = [];
+    const where = [];
     const params = [];
 
     if (req.query.status) {
@@ -128,7 +128,7 @@ export const getAll = async (req, res) => {
     );
 
     res.json({
-      data:       rows.map(parseRow),
+      data: rows.map(parseRow),
       pagination: { page, limit, total, pages: Math.ceil(total / limit) },
     });
   } catch (err) {
@@ -175,8 +175,8 @@ export const create = async (req, res) => {
   try {
     const body = req.body;
 
-    if (!body.gesca || !body.ip) {
-      return res.status(400).json({ message: 'gesca e ip son obligatorios' });
+    if (!body.gesca) {
+      return res.status(400).json({ message: 'GESCA es obligatorio' });
     }
 
     const cols = buildColumnMap(body);
@@ -185,9 +185,9 @@ export const create = async (req, res) => {
       return res.status(400).json({ message: 'No se proporcionaron datos' });
     }
 
-    const columns      = Object.keys(cols).join(', ');
+    const columns = Object.keys(cols).join(', ');
     const placeholders = Object.keys(cols).map(() => '?').join(', ');
-    const values       = Object.values(cols);
+    const values = Object.values(cols);
 
     const [result] = await pool.execute(
       `INSERT INTO payments_gest (${columns}) VALUES (${placeholders})`,
@@ -233,7 +233,7 @@ export const update = async (req, res) => {
     }
 
     const setClause = Object.keys(cols).map(c => `${c} = ?`).join(', ');
-    const values    = [...Object.values(cols), id];
+    const values = [...Object.values(cols), id];
 
     await pool.execute(
       `UPDATE payments_gest SET ${setClause} WHERE id = ?`,
