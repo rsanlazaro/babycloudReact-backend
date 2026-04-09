@@ -18,6 +18,7 @@ import authRoutes from './routes/auth.routes.js';
 import logsRoutes from './routes/logs.routes.js';
 import programRoutes from './routes/program.routes.js';
 import paymentsGestRoutes from './routes/paymentsGest.routes.js';
+import cloudIpsRoutes from './routes/cloudIps.routes.js';
 
 const app = express();
 
@@ -78,6 +79,7 @@ app.use('/api/auth', authRoutes);
 app.use('/api/logs', logsRoutes);
 app.use('/api/programs', programRoutes);
 app.use('/api/payments-gest', paymentsGestRoutes);
+app.use('/api/babycloud/ips-register', cloudIpsRoutes);
 
 // Serve static files from React build
 app.use(express.static(path.join(__dirname, 'build')));
