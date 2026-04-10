@@ -13,18 +13,55 @@ const TABLES = {
 const isValidId    = (id)    => Number.isInteger(Number(id)) && Number(id) > 0;
 const isValidStage = (stage) => TABLES[stage] !== undefined;
 
-// Ensure stage_data and phase_counts columns exist (runs once per table)
-const ensureColumns = async (tableName) => {
+// Column existence cache — avoids repeated ALTER TABLE calls per process lifetime
+const _columnChecked = new Set();
+
+// Safely add a column — handles both MySQL 8+ (IF NOT EXISTS) and older versions
+const addColumnSafe = async (tableName, columnName, columnDef) => {
+  const key = `${tableName}.${columnName}`;
+  if (_columnChecked.has(key)) return;
+
   try {
-    await pool.query(`ALTER TABLE \`${tableName}\` ADD COLUMN IF NOT EXISTS \`stage_data\` JSON`);
-  } catch { /* already exists */ }
+    // Try MySQL 8+ syntax first
+    await pool.query(
+      `ALTER TABLE \`${tableName}\` ADD COLUMN IF NOT EXISTS \`${columnName}\` ${columnDef}`
+    );
+    _columnChecked.add(key);
+  } catch (err) {
+    if (err.code === 'ER_PARSE_ERROR') {
+      // Older MySQL — fall back: check if column exists first
+      try {
+        const [cols] = await pool.query(
+          `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+           WHERE TABLE_SCHEMA = DATABASE()
+             AND TABLE_NAME   = ?
+             AND COLUMN_NAME  = ?`,
+          [tableName, columnName]
+        );
+        if (cols.length === 0) {
+          await pool.query(
+            `ALTER TABLE \`${tableName}\` ADD COLUMN \`${columnName}\` ${columnDef}`
+          );
+        }
+        _columnChecked.add(key);
+      } catch (innerErr) {
+        // Column likely already exists from a concurrent request — safe to ignore
+        if (innerErr.code !== 'ER_DUP_FIELDNAME') {
+          console.error('addColumnSafe fallback error:', innerErr.message);
+        }
+        _columnChecked.add(key);
+      }
+    } else if (err.code === 'ER_DUP_FIELDNAME') {
+      // Column already exists — mark as checked
+      _columnChecked.add(key);
+    } else {
+      console.error('addColumnSafe error:', err.message, err.code);
+    }
+  }
 };
 
-const ensureCountsColumn = async () => {
-  try {
-    await pool.query(`ALTER TABLE \`ipregister_1\` ADD COLUMN IF NOT EXISTS \`phase_counts\` JSON`);
-  } catch { /* already exists */ }
-};
+const ensureColumns = (tableName) => addColumnSafe(tableName, 'stage_data', 'JSON');
+const ensureCountsColumn = ()      => addColumnSafe('ipregister_1', 'phase_counts', 'JSON');
 
 // ─── GET /api/babycloud/ips-register/:guestId ────────────────────────────────
 // Returns { fields: { [stageId]: {...} }, counts: { count_1, count_2, count_3 } }
