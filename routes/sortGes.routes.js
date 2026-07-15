@@ -2,6 +2,7 @@
 import { Router } from 'express';
 import {
   getAllCandidates, getCandidate, createCandidate, updateCandidate, deleteCandidate,
+  updateCandidateFoto,
   getAltaGesca, upsertAltaGesca,
   getChecklist, upsertChecklist,
   getSeguroVidaList, createSeguroVida, updateSeguroVida, deleteSeguroVida,
@@ -15,11 +16,12 @@ import {
 const router = Router();
 
 // ── Candidates ───────────────────────────────────────────────
-router.get('/',       getAllCandidates);
-router.post('/',      createCandidate);
-router.get('/:id',    getCandidate);
-router.put('/:id',    updateCandidate);
-router.delete('/:id', deleteCandidate);
+router.get('/',           getAllCandidates);
+router.post('/',          createCandidate);
+router.get('/:id',        getCandidate);
+router.put('/:id/foto',   updateCandidateFoto);
+router.put('/:id',        updateCandidate);
+router.delete('/:id',     deleteCandidate);
 
 // ── Tab 1: Alta GESCA ────────────────────────────────────────
 router.get('/:candidateId/alta-gesca', getAltaGesca);

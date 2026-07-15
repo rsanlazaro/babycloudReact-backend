@@ -347,7 +347,7 @@ export const createSeguroVida = async (req, res) => {
          (candidate_id, aseguradora, gestor, cuotas, valor, fecha_alta, vencimiento)
        VALUES (?, ?, ?, 1, ?, ?, ?)`,
       [candidateId, aseguradora || null, gestor || null,
-       valor || null, fecha_alta || null, vencimiento || null]
+        valor || null, fecha_alta || null, vencimiento || null]
     );
     await logCreate(
       req.session.user.id, 'progestor',
@@ -375,7 +375,7 @@ export const updateSeguroVida = async (req, res) => {
        SET aseguradora = ?, gestor = ?, valor = ?, fecha_alta = ?, vencimiento = ?
        WHERE id = ?`,
       [aseguradora || null, gestor || null, valor || null,
-       fecha_alta || null, vencimiento || null, id]
+      fecha_alta || null, vencimiento || null, id]
     );
     await logUpdate(
       req.session.user.id, 'progestor',
@@ -769,4 +769,21 @@ export const deleteSeguimiento = async (req, res) => {
     );
     res.json({ success: true });
   } catch (err) { serverError(res, err, 'deleteSeguimiento'); }
+};
+
+// Update candidate image
+export const updateCandidateFoto = async (req, res) => {
+  if (!requireSession(req, res)) return;
+  const { id } = req.params;              // candidateId
+  const { fotoUrl } = req.body;
+  const today = new Date();
+  try {
+    await pool.query(
+      'UPDATE sort_ges_candidates SET foto_url = ? WHERE id = ?',
+      [fotoUrl || null, id]
+    );
+    await logUpdate(req.session.user.id, 'progestor',
+      `Actualizó foto de candidata #${id}`, today, `${id}`);
+    res.json({ success: true });
+  } catch (err) { serverError(res, err, 'updateCandidateFoto'); }
 };

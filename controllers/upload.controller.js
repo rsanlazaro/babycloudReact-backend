@@ -41,3 +41,33 @@ export const getUploadSignature = async (req, res) => {
     res.status(500).json({ message: 'Signature generation failed' });
   }
 };
+
+export const getCandidateUploadSignature = async (req, res) => {
+  try {
+    if (!req.session?.user) return res.status(401).json({ message: 'Not authenticated' });
+
+    const { candidateId } = req.query;
+    if (!candidateId) return res.status(400).json({ message: 'candidateId required' });
+
+    const timestamp = Math.round(Date.now() / 1000);
+    const folder = 'sort-ges-candidates';
+    const publicId = `candidate_${candidateId}`;
+
+    const signature = cloudinary.utils.api_sign_request(
+      {
+        timestamp, public_id: publicId, asset_folder: folder,
+        overwrite: true, transformation: 'c_fill,w_300,h_300,g_face'
+      },
+      process.env.CLOUDINARY_API_SECRET
+    );
+
+    res.json({
+      timestamp, signature, publicId,
+      assetFolder: folder, cloudName: process.env.CLOUDINARY_CLOUD_NAME,
+      apiKey: process.env.CLOUDINARY_API_KEY
+    });
+  } catch (err) {
+    console.error('CANDIDATE SIGNATURE ERROR:', err);
+    res.status(500).json({ message: 'Signature generation failed' });
+  }
+};
