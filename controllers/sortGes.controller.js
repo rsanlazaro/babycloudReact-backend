@@ -117,6 +117,22 @@ export const updateCandidate = async (req, res) => {
   } catch (err) { serverError(res, err, 'updateCandidate'); }
 };
 
+export const updateCandidateFoto = async (req, res) => {
+  if (!requireSession(req, res)) return;
+  const { id } = req.params;
+  const { fotoUrl } = req.body;
+  const today = new Date();
+  try {
+    await pool.query(
+      'UPDATE sort_ges_candidates SET foto_url = ? WHERE id = ?',
+      [fotoUrl || null, id]
+    );
+    await logUpdate(req.session.user.id, 'progestor',
+      `Actualizó foto de candidata #${id}`, today, `${id}`);
+    res.json({ success: true });
+  } catch (err) { serverError(res, err, 'updateCandidateFoto'); }
+};
+
 export const deleteCandidate = async (req, res) => {
   if (!requireSession(req, res)) return;
   const { id } = req.params;
@@ -256,29 +272,34 @@ export const upsertChecklist = async (req, res) => {
   if (!requireSession(req, res)) return;
   const { candidateId } = req.params;
   const today = new Date();
-  const {
-    certificado_nacimiento_url, curp_url, comprobante_domicilio_url,
-    poliza_seguro_url, cita_entrega, cita_firma,
-    consentimiento_informado, consentimiento_transferencia,
-    aviso_privacidad, informacion_personal, regular, hiv, gemelar, full_consent,
-  } = req.body;
 
-  const fields = {
-    certificado_nacimiento_url: certificado_nacimiento_url || null,
-    curp_url: curp_url || null,
-    comprobante_domicilio_url: comprobante_domicilio_url || null,
-    poliza_seguro_url: poliza_seguro_url || null,
-    cita_entrega: cita_entrega || null,
-    cita_firma: cita_firma || null,
-    consentimiento_informado: consentimiento_informado ? 1 : 0,
-    consentimiento_transferencia: consentimiento_transferencia ? 1 : 0,
-    aviso_privacidad: aviso_privacidad ? 1 : 0,
-    informacion_personal: informacion_personal ? 1 : 0,
-    regular: regular ? 1 : 0,
-    hiv: hiv ? 1 : 0,
-    gemelar: gemelar ? 1 : 0,
-    full_consent: full_consent ? 1 : 0,
-  };
+  // Build update map only from fields actually sent in the request body
+  // This allows partial updates (e.g. a single PDF URL) without overwriting other fields
+  const ALLOWED = [
+    'certificado_nacimiento_url', 'curp_url', 'comprobante_domicilio_url',
+    'poliza_seguro_url', 'cita_entrega', 'cita_firma',
+    'consentimiento_informado', 'consentimiento_transferencia',
+    'aviso_privacidad', 'informacion_personal',
+    'regular', 'hiv', 'gemelar', 'full_consent',
+  ];
+  const BOOL_FIELDS = [
+    'consentimiento_informado', 'consentimiento_transferencia',
+    'aviso_privacidad', 'informacion_personal',
+    'regular', 'hiv', 'gemelar', 'full_consent',
+  ];
+
+  const fields = {};
+  for (const key of ALLOWED) {
+    if (Object.prototype.hasOwnProperty.call(req.body, key)) {
+      fields[key] = BOOL_FIELDS.includes(key)
+        ? (req.body[key] ? 1 : 0)
+        : (req.body[key] || null);
+    }
+  }
+
+  if (Object.keys(fields).length === 0) {
+    return res.status(400).json({ message: 'No valid fields to update' });
+  }
 
   try {
     const [existing] = await pool.query(
@@ -286,7 +307,8 @@ export const upsertChecklist = async (req, res) => {
     );
 
     if (existing.length === 0) {
-      const cols = ['candidate_id', ...Object.keys(fields)];
+      // First save — INSERT with whatever fields we have
+      const cols         = ['candidate_id', ...Object.keys(fields)];
       const placeholders = cols.map(() => '?').join(', ');
       await pool.query(
         `INSERT INTO sort_ges_checklist (${cols.join(', ')}) VALUES (${placeholders})`,
@@ -297,6 +319,7 @@ export const upsertChecklist = async (req, res) => {
         `Creó Checklist para gestante #${candidateId}`, today, `${candidateId}`
       );
     } else {
+      // Partial UPDATE — only the columns in fields
       const setClause = Object.keys(fields).map(k => `${k} = ?`).join(', ');
       await pool.query(
         `UPDATE sort_ges_checklist SET ${setClause} WHERE candidate_id = ?`,
@@ -347,7 +370,7 @@ export const createSeguroVida = async (req, res) => {
          (candidate_id, aseguradora, gestor, cuotas, valor, fecha_alta, vencimiento)
        VALUES (?, ?, ?, 1, ?, ?, ?)`,
       [candidateId, aseguradora || null, gestor || null,
-        valor || null, fecha_alta || null, vencimiento || null]
+       valor || null, fecha_alta || null, vencimiento || null]
     );
     await logCreate(
       req.session.user.id, 'progestor',
@@ -375,7 +398,7 @@ export const updateSeguroVida = async (req, res) => {
        SET aseguradora = ?, gestor = ?, valor = ?, fecha_alta = ?, vencimiento = ?
        WHERE id = ?`,
       [aseguradora || null, gestor || null, valor || null,
-      fecha_alta || null, vencimiento || null, id]
+       fecha_alta || null, vencimiento || null, id]
     );
     await logUpdate(
       req.session.user.id, 'progestor',
@@ -769,21 +792,4 @@ export const deleteSeguimiento = async (req, res) => {
     );
     res.json({ success: true });
   } catch (err) { serverError(res, err, 'deleteSeguimiento'); }
-};
-
-// Update candidate image
-export const updateCandidateFoto = async (req, res) => {
-  if (!requireSession(req, res)) return;
-  const { id } = req.params;              // candidateId
-  const { fotoUrl } = req.body;
-  const today = new Date();
-  try {
-    await pool.query(
-      'UPDATE sort_ges_candidates SET foto_url = ? WHERE id = ?',
-      [fotoUrl || null, id]
-    );
-    await logUpdate(req.session.user.id, 'progestor',
-      `Actualizó foto de candidata #${id}`, today, `${id}`);
-    res.json({ success: true });
-  } catch (err) { serverError(res, err, 'updateCandidateFoto'); }
 };
