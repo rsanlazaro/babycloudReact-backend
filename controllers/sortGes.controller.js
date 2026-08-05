@@ -36,6 +36,7 @@ export const getAllCandidates = async (req, res) => {
     const [rows] = await pool.query(
       `SELECT c.id, c.status, c.ip_responsable, c.foto_url, c.created_at,
               a.nombre_completo, a.curp, a.fecha_nacimiento,
+              a.tel_1 AS telefono, a.email,
               a.tipo_sangre, a.peso, a.altura, a.imc,
               a.metodo_aco, a.embarazos, a.cesareas, a.partos, a.abortos, a.hijos
        FROM sort_ges_candidates c
@@ -180,6 +181,26 @@ export const upsertAltaGesca = async (req, res) => {
     fecha_ultima_menstruacion, ultima_cesarea, locked_fields,
   } = req.body;
 
+  // Required fields
+  if (!nombre_completo || !nombre_completo.trim()) {
+    return res.status(400).json({ message: 'El nombre completo es obligatorio' });
+  }
+  if (!fecha_nacimiento) {
+    return res.status(400).json({ message: 'La fecha de nacimiento es obligatoria' });
+  }
+  if (!tel_1 || !tel_1.trim()) {
+    return res.status(400).json({ message: 'El teléfono es obligatorio' });
+  }
+  if (!/^[0-9+\-\s()]+$/.test(tel_1) || tel_1.replace(/\D/g, '').length < 10) {
+    return res.status(400).json({ message: 'El teléfono solo debe contener números (10 dígitos mínimo)' });
+  }
+  if (!email || !email.trim()) {
+    return res.status(400).json({ message: 'El email es obligatorio' });
+  }
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return res.status(400).json({ message: 'Ingresa un email válido' });
+  }
+
   const fields = {
     nombre_completo: nombre_completo || null,
     curp: curp || null,
@@ -219,6 +240,24 @@ export const upsertAltaGesca = async (req, res) => {
   };
 
   try {
+    // Prevent duplicate phone numbers across candidates (normalized to digits only)
+    const normalizedPhone = tel_1.replace(/\D/g, '');
+    if (normalizedPhone) {
+      const [allPhones] = await pool.query(
+        `SELECT candidate_id, tel_1 FROM sort_ges_alta_gesca
+         WHERE candidate_id != ? AND tel_1 IS NOT NULL AND tel_1 != ''`,
+        [candidateId]
+      );
+      const duplicate = allPhones.some(
+        (row) => row.tel_1.replace(/\D/g, '') === normalizedPhone
+      );
+      if (duplicate) {
+        return res.status(409).json({
+          message: 'Ya existe un candidato registrado con este número de teléfono',
+        });
+      }
+    }
+
     const [existing] = await pool.query(
       'SELECT id FROM sort_ges_alta_gesca WHERE candidate_id = ?', [candidateId]
     );

@@ -1,6 +1,36 @@
 import pool from '../db.js';
 import { logUpdate, logCreate, logDelete } from '../services/activityLogger.js';
 
+// Generate the next sequential "Recluta" code for the current year
+// Format: R + YYYY + 3-digit increasing number (e.g. R2026001, R2026002, ...)
+const generateReclutaCode = async () => {
+    const year = new Date().getFullYear();
+    const prefix = `R${year}`;
+
+    const [rows] = await pool.query(
+        `SELECT codigo FROM guests
+     WHERE codigo LIKE ?
+     ORDER BY codigo DESC
+     LIMIT 1`,
+        [`${prefix}%`]
+    );
+
+    let nextNumber = 1;
+    if (rows.length > 0 && rows[0].codigo) {
+        const lastNumber = parseInt(rows[0].codigo.slice(prefix.length), 10);
+        if (!isNaN(lastNumber)) {
+            nextNumber = lastNumber + 1;
+        }
+    }
+
+    if (nextNumber > 999) {
+        throw new Error(`Se alcanzó el máximo de códigos Recluta (999) para el año ${year}`);
+    }
+
+    const paddedNumber = String(nextNumber).padStart(3, '0');
+    return `${prefix}${paddedNumber}`;
+};
+
 // Get all guests
 export const getAllGuests = async (req, res) => {
     if (!req.session?.user) {
@@ -15,6 +45,8 @@ export const getAllGuests = async (req, res) => {
         password,
         mail,
         profile,
+        phone,
+        codigo,
         created_on,
         enabled
        FROM guests
@@ -35,7 +67,7 @@ export const createGuest = async (req, res) => {
         return res.status(401).json({ message: 'Unauthorized' });
     }
 
-    const { username, email, password, profile } = req.body;
+    const { username, email, password, profile, phone } = req.body;
 
     if (!username || !email || !password || !profile) {
         return res.status(400).json({
@@ -56,6 +88,12 @@ export const createGuest = async (req, res) => {
             });
         }
 
+        // Auto-generate the Código only for Recluta guests (R + year + 001-999)
+        let codigo = null;
+        if (profile === 'recluta') {
+            codigo = await generateReclutaCode();
+        }
+
         const [result] = await pool.query(
             `
       INSERT INTO guests (
@@ -63,15 +101,17 @@ export const createGuest = async (req, res) => {
         mail,
         password,
         profile,
+        phone,
+        codigo,
         enabled,
         created_on
       )
-      VALUES (?, ?, ?, ?, 1, NOW())
+      VALUES (?, ?, ?, ?, ?, ?, 1, NOW())
       `,
-            [username, email, password, profile]
+            [username, email, password, profile, phone || null, codigo]
         );
 
-        const metadata = [username, email, password, profile];
+        const metadata = [username, email, password, profile, phone || null, codigo];
 
         // Return created guest
         const [newGuest] = await pool.query(
@@ -82,6 +122,8 @@ export const createGuest = async (req, res) => {
         mail,
         password,
         profile,
+        phone,
+        codigo,
         enabled,
         created_on
       FROM guests
@@ -113,7 +155,7 @@ export const updateGuest = async (req, res) => {
 
     const today = new Date();
     const { id } = req.params;
-    const { username, mail, password, profile, enabled } = req.body;
+    const { username, mail, password, profile, phone, enabled } = req.body;
 
     try {
         // Build dynamic update query
@@ -154,6 +196,11 @@ export const updateGuest = async (req, res) => {
         if (profile !== undefined) {
             updates.push('profile = ?');
             params.push(profile);
+        }
+
+        if (phone !== undefined) {
+            updates.push('phone = ?');
+            params.push(phone);
         }
 
         if (enabled !== undefined) {

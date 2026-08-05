@@ -244,7 +244,7 @@ export const createUser = async (req, res) => {
     return res.status(401).json({ message: 'Unauthorized' });
   }
 
-  const { username, email, password, profile = 'recluta' } = req.body;
+  const { username, email, password, profile = 'operador' } = req.body;
 
   if (!username || !email || !password) {
     return res.status(400).json({
@@ -257,7 +257,6 @@ export const createUser = async (req, res) => {
     'admin_junior',
     'coordinador',
     'operador',
-    'recluta',
   ];
 
   if (!allowedProfiles.includes(profile)) {
