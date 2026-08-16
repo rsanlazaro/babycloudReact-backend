@@ -9,6 +9,9 @@ export const ACTIVITY_TYPES = {
   CREATE: 'create',
   UPDATE: 'update',
   DELETE: 'delete',
+  PREVIEW: 'preview',   // e.g. user opened a PDF preview without generating/downloading it
+  GENERATE: 'generate',  // e.g. user generated/downloaded a final PDF
+  ACCESS: 'access',     // e.g. user opened/viewed a document (legal docs, etc.)
 };
 
 /**
@@ -127,6 +130,48 @@ export const logDelete = async (userId, entityType, description, created_at, met
   return logActivity({
     userId,
     activityType: ACTIVITY_TYPES.DELETE,
+    entityType,
+    description,
+    created_at,
+    metadata,
+  });
+};
+
+/**
+ * Log a PDF/document preview event (viewed but not generated/downloaded)
+ */
+export const logPreview = async (userId, entityType, description, created_at, metadata) => {
+  return logActivity({
+    userId,
+    activityType: ACTIVITY_TYPES.PREVIEW,
+    entityType,
+    description,
+    created_at,
+    metadata,
+  });
+};
+
+/**
+ * Log a PDF/document generation event (final PDF generated/downloaded)
+ */
+export const logGenerate = async (userId, entityType, description, created_at, metadata) => {
+  return logActivity({
+    userId,
+    activityType: ACTIVITY_TYPES.GENERATE,
+    entityType,
+    description,
+    created_at,
+    metadata,
+  });
+};
+
+/**
+ * Log a document access event (e.g. opened a legal document)
+ */
+export const logAccess = async (userId, entityType, description, created_at, metadata) => {
+  return logActivity({
+    userId,
+    activityType: ACTIVITY_TYPES.ACCESS,
     entityType,
     description,
     created_at,

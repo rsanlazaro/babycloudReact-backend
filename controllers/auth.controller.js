@@ -1,9 +1,8 @@
 import pool from '../db.js';
 import { logActivity, logUpdate, logCreate, logDelete, logLogin, logLogout, ACTIVITY_TYPES, ENTITY_TYPES } from '../services/activityLogger.js';
 
-const today = new Date();
-
 export const login = async (req, res) => {
+  const today = new Date();
   const { username, password } = req.body;
 
   if (!username || !password) {
@@ -113,6 +112,7 @@ export const login = async (req, res) => {
 };
 
 export const logout = async (req, res) => {
+  const today = new Date();
   if (!req.session.user) {
     return res.status(400).json({ message: 'User session not defined' });
   }
