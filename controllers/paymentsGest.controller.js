@@ -2,6 +2,7 @@
 // CRUD for payments_gest — gestante payment schemes
 
 import pool from '../db.js';
+import { logCreate, logUpdate, logDelete } from '../services/activityLogger.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -199,6 +200,16 @@ export const create = async (req, res) => {
       [result.insertId]
     );
 
+    if (req.session?.user?.id) {
+      logCreate(
+        req.session.user.id,
+        'progestor',
+        `Creó registro de pagos - ${body.gesca}`,
+        new Date(),
+        { paymentsGestId: result.insertId, gesca: body.gesca, ip: body.ip || null }
+      );
+    }
+
     res.status(201).json(parseRow(newRows[0]));
   } catch (err) {
     console.error('[paymentsGest] create error:', err);
@@ -217,9 +228,14 @@ export const update = async (req, res) => {
   try {
     const { id } = req.params;
     const body = req.body;
+    // Not a DB column — sent by the frontend to describe which accordion
+    // section(s) changed since the last save, purely for activity logging.
+    const modifiedSections = Array.isArray(body._modifiedSections)
+      ? body._modifiedSections.filter(Boolean)
+      : [];
 
     const [existing] = await pool.execute(
-      'SELECT id FROM payments_gest WHERE id = ?',
+      'SELECT id, gesca FROM payments_gest WHERE id = ?',
       [id]
     );
     if (!existing.length) {
@@ -245,6 +261,18 @@ export const update = async (req, res) => {
       [id]
     );
 
+    if (req.session?.user?.id && modifiedSections.length) {
+      const gesca = body.gesca || existing[0].gesca;
+      const description = `Modificó registro de pagos - ${gesca} — Secciones: ${modifiedSections.join(', ')}`;
+      logUpdate(
+        req.session.user.id,
+        'progestor',
+        description,
+        new Date(),
+        { paymentsGestId: Number(id), gesca, sections: modifiedSections }
+      );
+    }
+
     res.json(parseRow(updated[0]));
   } catch (err) {
     console.error('[paymentsGest] update error:', err);
@@ -264,7 +292,7 @@ export const remove = async (req, res) => {
     const { id } = req.params;
 
     const [existing] = await pool.execute(
-      'SELECT id FROM payments_gest WHERE id = ?',
+      'SELECT id, gesca FROM payments_gest WHERE id = ?',
       [id]
     );
     if (!existing.length) {
@@ -272,6 +300,16 @@ export const remove = async (req, res) => {
     }
 
     await pool.execute('DELETE FROM payments_gest WHERE id = ?', [id]);
+
+    if (req.session?.user?.id) {
+      logDelete(
+        req.session.user.id,
+        'progestor',
+        `Eliminó registro de pagos - ${existing[0].gesca}`,
+        new Date(),
+        { paymentsGestId: Number(id), gesca: existing[0].gesca }
+      );
+    }
 
     res.json({ message: 'Esquema eliminado correctamente', id: parseInt(id) });
   } catch (err) {

@@ -9,7 +9,7 @@ export const getMe = async (req, res) => {
 
   try {
     // Build dynamic column selection for access_1 to access_83
-    const accessColumns = Array.from({ length: 83 }, (_, i) => `access_${i + 1}`).join(', ');
+    const accessColumns = Array.from({ length: 100 }, (_, i) => `access_${i + 1}`).join(', ');
 
     const [rows] = await pool.query(
       `SELECT 
@@ -32,7 +32,7 @@ export const getMe = async (req, res) => {
 
     // Extract permissions
     const access = {};
-    for (let i = 1; i <= 83; i++) {
+    for (let i = 1; i <= 100; i++) {
       access[`access_${i}`] = user[`access_${i}`] ?? 0;
     }
 
@@ -549,7 +549,7 @@ export const getUserRoles = async (req, res) => {
 
   try {
     // Build dynamic column selection for access_1 to access_83
-    const accessColumns = Array.from({ length: 83 }, (_, i) => `access_${i + 1}`).join(', ');
+    const accessColumns = Array.from({ length: 100 }, (_, i) => `access_${i + 1}`).join(', ');
 
     const [rows] = await pool.query(
       `SELECT 
@@ -570,7 +570,7 @@ export const getUserRoles = async (req, res) => {
 
     // Extract permissions
     const permissions = {};
-    for (let i = 1; i <= 83; i++) {
+    for (let i = 1; i <= 100; i++) {
       permissions[`access_${i}`] = user[`access_${i}`] ?? 0;
     }
 
@@ -607,7 +607,7 @@ export const updateUserRoles = async (req, res) => {
     const updates = [];
     const params = [];
 
-    for (let i = 1; i <= 83; i++) {
+    for (let i = 1; i <= 100; i++) {
       const key = `access_${i}`;
       if (permissions[key] !== undefined) {
         const value = parseInt(permissions[key], 10);
@@ -670,7 +670,7 @@ export const getAccessRoles = async (req, res) => {
     const columns = [];
 
     profiles.forEach((profile) => {
-      for (let i = 1; i <= 83; i++) {
+      for (let i = 1; i <= 100; i++) {
         columns.push(`${profile}_${i}`);
       }
     });
@@ -715,7 +715,7 @@ export const updateAccessRoles = async (req, res) => {
     const today = new Date();
 
     profiles.forEach((profile) => {
-      for (let i = 1; i <= 83; i++) {
+      for (let i = 1; i <= 100; i++) {
         const key = `${profile}_${i}`;
         if (permissions[key] !== undefined) {
           const value = parseInt(permissions[key], 10);

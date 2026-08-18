@@ -10,8 +10,8 @@ export const login = async (req, res) => {
   }
 
   try {
-    // Build dynamic column selection for access_1 to access_83
-    const accessColumns = Array.from({ length: 83 }, (_, i) => `access_${i + 1}`).join(', ');
+    // Build dynamic column selection for access_1 to access_95
+    const accessColumns = Array.from({ length: 100 }, (_, i) => `access_${i + 1}`).join(', ');
 
     const [rows] = await pool.query(
       `SELECT 
@@ -44,9 +44,9 @@ export const login = async (req, res) => {
       return res.status(401).json({ message: 'Credenciales inválidas' });
     }
 
-    // Extract permissions (access_1 to access_83)
+    // Extract permissions (access_1 to access_95)
     const access = {};
-    for (let i = 1; i <= 83; i++) {
+    for (let i = 1; i <= 100; i++) {
       access[`access_${i}`] = user[`access_${i}`] ?? 0;
     }
 
