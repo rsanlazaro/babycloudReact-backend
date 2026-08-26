@@ -38,9 +38,15 @@ export const getAllCandidates = async (req, res) => {
               a.nombre_completo, a.curp, a.fecha_nacimiento,
               a.tipo_sangre, a.peso, a.altura, a.imc,
               a.metodo_aco, a.embarazos, a.cesareas, a.partos, a.abortos, a.hijos,
-              a.esquema_ofrecido
+              a.esquema_ofrecido,
+              ck.certificado_nacimiento_url, ck.curp_url,
+              ck.comprobante_domicilio_url, ck.poliza_seguro_url,
+              ck.consentimiento_informado, ck.consentimiento_transferencia,
+              ck.aviso_privacidad, ck.informacion_personal,
+              ck.regular, ck.hiv, ck.gemelar, ck.full_consent
        FROM sort_ges_candidates c
        LEFT JOIN sort_ges_alta_gesca a ON a.candidate_id = c.id
+       LEFT JOIN sort_ges_checklist ck ON ck.candidate_id = c.id
        ORDER BY c.created_at DESC`
     );
     res.json(rows);
