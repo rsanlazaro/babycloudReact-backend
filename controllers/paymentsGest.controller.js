@@ -21,6 +21,7 @@ const JSON_FIELDS = [
   'extrato_gastos',
   'ayuda_state',
   'row_comments',
+  'cdo_gesca_state',
 ];
 
 /**
