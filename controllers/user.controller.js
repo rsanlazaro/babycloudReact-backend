@@ -40,8 +40,9 @@ export const getMe = async (req, res) => {
     // Define allowed users for the special button (ONLY IN BACKEND)
     const ALLOWED_USERS_FOR_BUTTON = [
       'admin',
-      'john_doe',
-      'special_user',
+      'AdminBabyCloud',
+      'Gerencia_Jr',
+      'Anthony',
       // Add more usernames here as needed
     ];
 

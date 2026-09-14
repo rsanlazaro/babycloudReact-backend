@@ -34,7 +34,7 @@ export const getAllCandidates = async (req, res) => {
   if (!requireSession(req, res)) return;
   try {
     const [rows] = await pool.query(
-      `SELECT c.id, c.status, c.ip_responsable, c.foto_url, c.created_at,
+      `SELECT c.id, c.status, c.ip_responsable, c.programa, c.status_general, c.contra_status, c.foto_url, c.created_at,
               a.nombre_completo, a.curp, a.fecha_nacimiento,
               a.tipo_sangre, a.peso, a.altura, a.imc,
               a.metodo_aco, a.embarazos, a.cesareas, a.partos, a.abortos, a.hijos,
@@ -58,7 +58,7 @@ export const getCandidate = async (req, res) => {
   const { id } = req.params;
   try {
     const [rows] = await pool.query(
-      `SELECT c.id, c.status, c.ip_responsable, c.foto_url, c.created_at,
+      `SELECT c.id, c.status, c.ip_responsable, c.programa, c.status_general, c.contra_status, c.foto_url, c.created_at,
               a.nombre_completo, a.curp, a.fecha_nacimiento,
               a.tel_1 AS telefono, a.email,
               a.direccion, a.numero, a.postal,
@@ -78,12 +78,12 @@ export const getCandidate = async (req, res) => {
 
 export const createCandidate = async (req, res) => {
   if (!requireSession(req, res)) return;
-  const { status = 'iniciales', ip_responsable, foto_url } = req.body;
+  const { status = 'iniciales', ip_responsable, programa, foto_url } = req.body;
   const today = new Date();
   try {
     const [result] = await pool.query(
-      'INSERT INTO sort_ges_candidates (status, ip_responsable, foto_url) VALUES (?, ?, ?)',
-      [status, ip_responsable || null, foto_url || null]
+      'INSERT INTO sort_ges_candidates (status, ip_responsable, programa, foto_url) VALUES (?, ?, ?, ?)',
+      [status, ip_responsable || null, programa || null, foto_url || null]
     );
     const newId = result.insertId;
 
@@ -109,12 +109,28 @@ export const createCandidate = async (req, res) => {
 export const updateCandidate = async (req, res) => {
   if (!requireSession(req, res)) return;
   const { id } = req.params;
-  const { status, ip_responsable, foto_url } = req.body;
   const today = new Date();
+
+  // Partial update — only touch fields actually sent in the request body,
+  // so e.g. changing just ip_responsable from a table dropdown doesn't
+  // silently null out status, programa, or foto_url.
+  const ALLOWED = ['status', 'ip_responsable', 'programa', 'foto_url'];
+  const fields = {};
+  for (const key of ALLOWED) {
+    if (Object.prototype.hasOwnProperty.call(req.body, key)) {
+      fields[key] = req.body[key] || null;
+    }
+  }
+
+  if (Object.keys(fields).length === 0) {
+    return res.status(400).json({ message: 'No valid fields to update' });
+  }
+
   try {
+    const setClause = Object.keys(fields).map(k => `${k} = ?`).join(', ');
     await pool.query(
-      'UPDATE sort_ges_candidates SET status = ?, ip_responsable = ?, foto_url = ? WHERE id = ?',
-      [status, ip_responsable || null, foto_url || null, id]
+      `UPDATE sort_ges_candidates SET ${setClause} WHERE id = ?`,
+      [...Object.values(fields), id]
     );
     await logUpdate(
       req.session.user.id, 'progestor',
@@ -156,6 +172,47 @@ export const deleteCandidate = async (req, res) => {
     );
     res.json({ success: true });
   } catch (err) { serverError(res, err, 'deleteCandidate'); }
+};
+
+// Registers a status against the candidate's "Status General" / "Contra
+// Status" slots. If status_general is still empty, the status is written
+// there. If status_general is already occupied, it's written to
+// contra_status instead — this is the "second scenario" slot. Triggered
+// today only by the "Indicar posible descarte" button (status =
+// 'posible_descarte'), but written generically so future status types can
+// reuse the same two-slot logic without a new endpoint.
+export const registerCandidateStatus = async (req, res) => {
+  if (!requireSession(req, res)) return;
+  const { id } = req.params;
+  const { status } = req.body;
+  const today = new Date();
+
+  if (!status) {
+    return res.status(400).json({ message: 'status is required' });
+  }
+
+  try {
+    const [rows] = await pool.query(
+      'SELECT status_general, contra_status FROM sort_ges_candidates WHERE id = ?', [id]
+    );
+    if (!rows.length) return notFound(res, 'Candidate');
+
+    const { status_general, contra_status } = rows[0];
+    const targetField = status_general ? 'contra_status' : 'status_general';
+
+    await pool.query(
+      `UPDATE sort_ges_candidates SET ${targetField} = ? WHERE id = ?`,
+      [status, id]
+    );
+
+    await logUpdate(
+      req.session.user.id, 'progestor',
+      `Registró ${targetField === 'status_general' ? 'Status General' : 'Contra Status'} (${status}) para gestante #${id}`,
+      today, `${id}`
+    );
+
+    res.json({ success: true, field: targetField, status });
+  } catch (err) { serverError(res, err, 'registerCandidateStatus'); }
 };
 
 // ═════════════════════════════════════════════════════════════

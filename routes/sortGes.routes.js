@@ -2,7 +2,7 @@
 import { Router } from 'express';
 import {
   getAllCandidates, getCandidate, createCandidate, updateCandidate, deleteCandidate,
-  updateCandidateFoto,
+  updateCandidateFoto, registerCandidateStatus,
   getAltaGesca, upsertAltaGesca,
   getChecklist, upsertChecklist,
   getSeguroVidaList, createSeguroVida, updateSeguroVida, deleteSeguroVida,
@@ -20,6 +20,7 @@ router.get('/',           getAllCandidates);
 router.post('/',          createCandidate);
 router.get('/:id',        getCandidate);
 router.put('/:id/foto',   updateCandidateFoto);
+router.put('/:id/status', registerCandidateStatus);
 router.put('/:id',        updateCandidate);
 router.delete('/:id',     deleteCandidate);
 
