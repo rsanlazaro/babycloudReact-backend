@@ -1,8 +1,28 @@
 import pool from '../db.js';
 import { logActivity, logUpdate, logCreate, logDelete, logLogin, logLogout, ACTIVITY_TYPES, ENTITY_TYPES } from '../services/activityLogger.js';
+import { buildGuestPayload, isEnabled } from './auth.controller.js';
 
 // Update getMe to also return permissions
 export const getMe = async (req, res) => {
+  // Guest session: re-check the guest still exists and is enabled
+  if (req.session?.guest && !req.session?.user) {
+    try {
+      const [rows] = await pool.query(
+        'SELECT id, username, mail, profile, enabled FROM guests WHERE id = ?',
+        [req.session.guest.id]
+      );
+      if (rows.length === 0 || !isEnabled(rows[0].enabled)) {
+        return req.session.destroy(() => res.status(401).json({ message: 'Unauthorized' }));
+      }
+      const g = rows[0];
+      req.session.guest = { id: g.id, username: g.username, email: g.mail, profile: g.profile };
+      return res.json({ user: buildGuestPayload(req.session.guest), access: {} });
+    } catch (err) {
+      console.error('GET ME (GUEST) ERROR:', err);
+      return res.status(500).json({ message: 'Server error' });
+    }
+  }
+
   if (!req.session?.user) {
     return res.status(401).json({ message: 'Unauthorized' });
   }
@@ -41,6 +61,7 @@ export const getMe = async (req, res) => {
     const ALLOWED_USERS_FOR_BUTTON = [
       'admin',
       'Gerencia_Jr',
+      'Hennanie',
       'AdminBabyCloud',
       'Junior',
       'Anthony',

@@ -73,6 +73,11 @@ function tableForCol(stageId, col) {
 }
 
 const isValidId    = (id)  => Number.isInteger(Number(id)) && Number(id) > 0;
+
+// Read access: any logged-in user, or a guest viewing ONLY their own register
+const canReadRegister = (session, guestId) =>
+  !!session?.user ||
+  (!!session?.guest && Number(session.guest.id) === Number(guestId));
 const isValidStage = (s)   => [1, 2, 3, 4, 5, 6].includes(Number(s));
 
 // ─── GET /api/babycloud/ips-register/:guestId ────────────────────────────────
@@ -80,9 +85,10 @@ const isValidStage = (s)   => [1, 2, 3, 4, 5, 6].includes(Number(s));
 //           counts: { count_1, count_2, count_3 } }
 
 export const getRegister = async (req, res) => {
-  if (!req.session?.user) return res.status(401).json({ message: 'Unauthorized' });
-
   const { guestId } = req.params;
+  if (!req.session?.user && !req.session?.guest) return res.status(401).json({ message: 'Unauthorized' });
+  if (!canReadRegister(req.session, guestId))   return res.status(403).json({ message: 'Forbidden' });
+
   if (!isValidId(guestId)) return res.status(400).json({ message: 'ID inválido' });
 
   try {

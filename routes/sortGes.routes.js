@@ -11,6 +11,7 @@ import {
   updateCuotaPago, removeCuotaPago,
   getPsicoInicial, updatePsicoInicialRow,
   getSeguimientoList, createSeguimiento, updateSeguimiento, deleteSeguimiento,
+  getCitaPreviaList, createCitaPrevia, updateCitaPrevia, deleteCitaPrevia,
 } from '../controllers/sortGes.controller.js';
 
 const router = Router();
@@ -55,5 +56,10 @@ router.get(    '/:candidateId/seguimiento',            getSeguimientoList);
 router.post(   '/:candidateId/seguimiento',            createSeguimiento);
 router.put(    '/:candidateId/seguimiento/:id',        updateSeguimiento);
 router.delete( '/:candidateId/seguimiento/:id',        deleteSeguimiento);
+
+router.get('/:candidateId/cita-previa', getCitaPreviaList);
+router.post('/:candidateId/cita-previa', createCitaPrevia);
+router.put('/:candidateId/cita-previa/:id', updateCitaPrevia);
+router.delete('/:candidateId/cita-previa/:id', deleteCitaPrevia);
 
 export default router;

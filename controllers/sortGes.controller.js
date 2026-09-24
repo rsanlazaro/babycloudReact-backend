@@ -34,10 +34,11 @@ export const getAllCandidates = async (req, res) => {
   if (!requireSession(req, res)) return;
   try {
     const [rows] = await pool.query(
-      `SELECT c.id, c.status, c.ip_responsable, c.programa, c.status_general, c.contra_status, c.foto_url, c.created_at,
+      `SELECT c.id, c.status, c.ip_responsable, c.resp_admisiones, c.resp_att_previa, c.resp_psicologia,
+              c.programa, c.vinculo, c.status_general, c.contra_status, c.foto_url, c.created_at,
               a.nombre_completo, a.curp, a.fecha_nacimiento,
               a.tipo_sangre, a.peso, a.altura, a.imc,
-              a.metodo_aco, a.embarazos, a.cesareas, a.partos, a.abortos, a.hijos,
+              a.metodo_aco, a.tiempo_metodo_aco, a.embarazos, a.cesareas, a.partos, a.abortos, a.hijos,
               a.esquema_ofrecido,
               ck.certificado_nacimiento_url, ck.curp_url,
               ck.comprobante_domicilio_url, ck.poliza_seguro_url,
@@ -58,13 +59,14 @@ export const getCandidate = async (req, res) => {
   const { id } = req.params;
   try {
     const [rows] = await pool.query(
-      `SELECT c.id, c.status, c.ip_responsable, c.programa, c.status_general, c.contra_status, c.foto_url, c.created_at,
+      `SELECT c.id, c.status, c.ip_responsable, c.resp_admisiones, c.resp_att_previa, c.resp_psicologia,
+              c.programa, c.vinculo, c.status_general, c.contra_status, c.foto_url, c.created_at,
               a.nombre_completo, a.curp, a.fecha_nacimiento,
               a.tel_1 AS telefono, a.email,
               a.direccion, a.numero, a.postal,
               a.alcaldia_municipio AS ciudad, a.estado,
               a.tipo_sangre, a.peso, a.altura, a.imc,
-              a.metodo_aco, a.embarazos, a.cesareas, a.partos, a.abortos, a.hijos,
+              a.metodo_aco, a.tiempo_metodo_aco, a.embarazos, a.cesareas, a.partos, a.abortos, a.hijos,
               a.esquema_ofrecido
        FROM sort_ges_candidates c
        LEFT JOIN sort_ges_alta_gesca a ON a.candidate_id = c.id
@@ -78,12 +80,12 @@ export const getCandidate = async (req, res) => {
 
 export const createCandidate = async (req, res) => {
   if (!requireSession(req, res)) return;
-  const { status = 'iniciales', ip_responsable, programa, foto_url } = req.body;
+  const { status = 'iniciales', ip_responsable, programa, foto_url, vinculo } = req.body;
   const today = new Date();
   try {
     const [result] = await pool.query(
-      'INSERT INTO sort_ges_candidates (status, ip_responsable, programa, foto_url) VALUES (?, ?, ?, ?)',
-      [status, ip_responsable || null, programa || null, foto_url || null]
+      'INSERT INTO sort_ges_candidates (status, ip_responsable, programa, foto_url, vinculo) VALUES (?, ?, ?, ?, ?)',
+      [status, ip_responsable || null, programa || null, foto_url || null, vinculo || null]
     );
     const newId = result.insertId;
 
@@ -114,7 +116,10 @@ export const updateCandidate = async (req, res) => {
   // Partial update — only touch fields actually sent in the request body,
   // so e.g. changing just ip_responsable from a table dropdown doesn't
   // silently null out status, programa, or foto_url.
-  const ALLOWED = ['status', 'ip_responsable', 'programa', 'foto_url'];
+  const ALLOWED = [
+    'status', 'ip_responsable', 'resp_admisiones', 'resp_att_previa', 'resp_psicologia',
+    'programa', 'foto_url', 'vinculo',
+  ];
   const fields = {};
   for (const key of ALLOWED) {
     if (Object.prototype.hasOwnProperty.call(req.body, key)) {
@@ -856,4 +861,119 @@ export const deleteSeguimiento = async (req, res) => {
     );
     res.json({ success: true });
   } catch (err) { serverError(res, err, 'deleteSeguimiento'); }
+};
+
+// ═════════════════════════════════════════════════════════════
+// TAB 5 — CITA PREVIA
+// Same shape as Seguimiento above: a flat, dynamic list of records per
+// candidate. Each row also carries sub_tab (iniciales / tratamiento_previo /
+// prepa_transfer / pre_natal / materno_fetal) so the frontend can group a
+// single fetched list into its 5 sub-tabs without 5 separate requests.
+// updateCitaPrevia follows updateSeguimiento's convention of overwriting
+// every column on each save (the frontend sends the full row each time a
+// field changes), not a partial update.
+// ═════════════════════════════════════════════════════════════
+
+export const getCitaPreviaList = async (req, res) => {
+  if (!requireSession(req, res)) return;
+  const { candidateId } = req.params;
+  try {
+    const [rows] = await pool.query(
+      'SELECT * FROM sort_ges_cita_previa WHERE candidate_id = ? ORDER BY created_at ASC',
+      [candidateId]
+    );
+    res.json(rows);
+  } catch (err) { serverError(res, err, 'getCitaPreviaList'); }
+};
+
+export const createCitaPrevia = async (req, res) => {
+  if (!requireSession(req, res)) return;
+  const { candidateId } = req.params;
+  const today = new Date();
+  const {
+    sub_tab, motivo, sdg, inicio_tratamiento, final: fechaFinal, diagnostico,
+    fecha_cita, dr_tratante, status, comentario_solicitud,
+    entrega_resultados, reportes, status_resultados, observaciones,
+  } = req.body;
+
+  if (!sub_tab) {
+    return res.status(400).json({ message: 'sub_tab is required' });
+  }
+
+  try {
+    const [result] = await pool.query(
+      `INSERT INTO sort_ges_cita_previa
+         (candidate_id, sub_tab, motivo, sdg, inicio_tratamiento, \`final\`,
+          diagnostico, fecha_cita, dr_tratante, status, comentario_solicitud,
+          entrega_resultados, reportes, status_resultados, observaciones)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        candidateId, sub_tab,
+        motivo || null, sdg || null,
+        inicio_tratamiento || null, fechaFinal || null,
+        diagnostico ? 1 : 0,
+        fecha_cita || null, dr_tratante || null, status || null,
+        comentario_solicitud || null, entrega_resultados || null,
+        reportes || null, status_resultados || null, observaciones || null,
+      ]
+    );
+    await logCreate(
+      req.session.user.id, 'progestor',
+      `Creó Cita Previa (${sub_tab}) para gestante #${candidateId}`, today, `${result.insertId}`
+    );
+    const [rows] = await pool.query(
+      'SELECT * FROM sort_ges_cita_previa WHERE id = ?', [result.insertId]
+    );
+    res.status(201).json(rows[0]);
+  } catch (err) { serverError(res, err, 'createCitaPrevia'); }
+};
+
+export const updateCitaPrevia = async (req, res) => {
+  if (!requireSession(req, res)) return;
+  const { id } = req.params;
+  const today = new Date();
+  const {
+    sub_tab, motivo, sdg, inicio_tratamiento, final: fechaFinal, diagnostico,
+    fecha_cita, dr_tratante, status, comentario_solicitud,
+    entrega_resultados, reportes, status_resultados, observaciones,
+  } = req.body;
+
+  try {
+    await pool.query(
+      `UPDATE sort_ges_cita_previa
+       SET sub_tab = ?, motivo = ?, sdg = ?, inicio_tratamiento = ?, \`final\` = ?,
+           diagnostico = ?, fecha_cita = ?, dr_tratante = ?, status = ?,
+           comentario_solicitud = ?, entrega_resultados = ?, reportes = ?,
+           status_resultados = ?, observaciones = ?
+       WHERE id = ?`,
+      [
+        sub_tab || null, motivo || null, sdg || null,
+        inicio_tratamiento || null, fechaFinal || null,
+        diagnostico ? 1 : 0,
+        fecha_cita || null, dr_tratante || null, status || null,
+        comentario_solicitud || null, entrega_resultados || null,
+        reportes || null, status_resultados || null, observaciones || null,
+        id,
+      ]
+    );
+    await logUpdate(
+      req.session.user.id, 'progestor',
+      `Actualizó Cita Previa #${id}`, today, `${id}`
+    );
+    res.json({ success: true });
+  } catch (err) { serverError(res, err, 'updateCitaPrevia'); }
+};
+
+export const deleteCitaPrevia = async (req, res) => {
+  if (!requireSession(req, res)) return;
+  const { id } = req.params;
+  const today = new Date();
+  try {
+    await pool.query('DELETE FROM sort_ges_cita_previa WHERE id = ?', [id]);
+    await logDelete(
+      req.session.user.id, 'progestor',
+      `Eliminó Cita Previa #${id}`, today, `${id}`
+    );
+    res.json({ success: true });
+  } catch (err) { serverError(res, err, 'deleteCitaPrevia'); }
 };
