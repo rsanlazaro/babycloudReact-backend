@@ -3,13 +3,16 @@
 
 import pool from '../db.js';
 import { logCreate, logUpdate, logDelete } from '../services/activityLogger.js';
+import { normalizeCurp, isValidCurp, CURP_FORMAT_MESSAGE } from '../services/curp.js';
+import { ensureCandidateForPayment } from '../services/sortGesRecords.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** JSON fields that come in as objects/arrays and must be serialised for MySQL */
-const JSON_FIELDS = [
+/** JSON fields that come in as objects/arrays and must be serialised for MySQL.
+ *  Exported: sortGes.controller.js uses it when creating a scheme from SORT_GES. */
+export const JSON_FIELDS = [
   'transferencias',
   'row_states',
   'puerperio_states',
@@ -28,7 +31,7 @@ const JSON_FIELDS = [
  * Scalar fields that map directly to columns.
  */
 const SCALAR_FIELDS = [
-  'gesca', 'ip', 'banco', 'clabe', 'country',
+  'gesca', 'curp', 'ip', 'banco', 'clabe', 'country',
   'insurance', 'policy', 'manager', 'fum', 'giro_semana',
   'scheme_value', 'status',
   'bono_vih', 'bono_gemelar',
@@ -47,6 +50,9 @@ function buildColumnMap(body) {
     if (f in body) cols[f] = body[f];
   });
 
+  // CURP always stored normalized (uppercase, no spaces); empty → NULL
+  if ('curp' in cols) cols.curp = normalizeCurp(cols.curp) || null;
+
   JSON_FIELDS.forEach(f => {
     if (f in body) {
       cols[f] = typeof body[f] === 'string'
@@ -57,6 +63,22 @@ function buildColumnMap(body) {
 
   return cols;
 }
+
+/** Returns the payments_gest row (id, gesca) that already uses this CURP, if any. */
+async function findSchemeByCurp(curp, excludeId = null) {
+  const params = [curp];
+  let sql = 'SELECT id, gesca, scheme_value FROM payments_gest WHERE curp = ?';
+  if (excludeId) { sql += ' AND id <> ?'; params.push(excludeId); }
+  const [rows] = await pool.execute(`${sql} LIMIT 1`, params);
+  return rows[0] || null;
+}
+
+const duplicateCurpResponse = (res, existing) =>
+  res.status(409).json({
+    message: `Ya existe un esquema de pagos con esta CURP (${existing.gesca || `#${existing.id}`})`,
+    code: 'DUPLICATE_CURP',
+    existingId: existing.id,
+  });
 
 /**
  * Parse JSON columns back to objects after a SELECT.
@@ -106,6 +128,10 @@ export const getAll = async (req, res) => {
       where.push('ip LIKE ?');
       params.push(`%${req.query.ip}%`);
     }
+    if (req.query.curp) {
+      where.push('curp = ?');
+      params.push(normalizeCurp(req.query.curp));
+    }
 
     const whereClause = where.length ? `WHERE ${where.join(' AND ')}` : '';
 
@@ -115,7 +141,7 @@ export const getAll = async (req, res) => {
     //    server versions — causes ER_WRONG_ARGUMENTS.
     //    The values are already sanitized integers so this is safe.
     const [rows] = await pool.execute(
-      `SELECT id, gesca, ip, country, scheme_value, status, manager,
+      `SELECT id, gesca, curp, ip, country, scheme_value, status, manager,
               ayuda_maternidad, ayuda_amount, row_states, puerperio_states, created_at, updated_at
        FROM payments_gest
        ${whereClause}
@@ -181,6 +207,16 @@ export const create = async (req, res) => {
       return res.status(400).json({ message: 'GESCA es obligatorio' });
     }
 
+    const curp = normalizeCurp(body.curp);
+    if (!curp) {
+      return res.status(400).json({ message: 'La CURP es obligatoria' });
+    }
+    if (!isValidCurp(curp)) {
+      return res.status(400).json({ message: CURP_FORMAT_MESSAGE });
+    }
+    const dup = await findSchemeByCurp(curp);
+    if (dup) return duplicateCurpResponse(res, dup);
+
     const cols = buildColumnMap(body);
 
     if (!Object.keys(cols).length) {
@@ -211,8 +247,24 @@ export const create = async (req, res) => {
       );
     }
 
-    res.status(201).json(parseRow(newRows[0]));
+    // Make it appear in SORT_GES too (linked by CURP). If that fails, the
+    // payment scheme is still created and the frontend shows a warning.
+    const created = parseRow(newRows[0]);
+    try {
+      const sortGes = await ensureCandidateForPayment(created, req.session?.user?.id);
+      created._sortGes = sortGes; // { id, created }
+    } catch (linkErr) {
+      console.error('[paymentsGest] could not create SORT_GES register:', linkErr);
+      created._sortGesError = 'El esquema se creó, pero no se pudo crear su registro en SORT_GES';
+    }
+
+    res.status(201).json(created);
   } catch (err) {
+    // Two creations with the same CURP at the same moment → unique index wins
+    if (err.code === 'ER_DUP_ENTRY') {
+      const dup = await findSchemeByCurp(normalizeCurp(req.body.curp)).catch(() => null);
+      if (dup) return duplicateCurpResponse(res, dup);
+    }
     console.error('[paymentsGest] create error:', err);
     console.error('Error stack:', err.stack);
     res.status(500).json({
@@ -236,7 +288,7 @@ export const update = async (req, res) => {
       : [];
 
     const [existing] = await pool.execute(
-      'SELECT id, gesca FROM payments_gest WHERE id = ?',
+      'SELECT id, gesca, curp FROM payments_gest WHERE id = ?',
       [id]
     );
     if (!existing.length) {
@@ -247,6 +299,22 @@ export const update = async (req, res) => {
 
     if (!Object.keys(cols).length) {
       return res.status(400).json({ message: 'No se proporcionaron datos para actualizar' });
+    }
+
+    if ('curp' in cols) {
+      if (!cols.curp) {
+        if (existing[0].curp) {
+          // CURP is required: once set it can be changed but not removed
+          return res.status(400).json({ message: 'La CURP es obligatoria y no puede quedar vacía' });
+        }
+        delete cols.curp; // older register still without CURP — keep saving the rest
+      } else {
+        if (!isValidCurp(cols.curp)) {
+          return res.status(400).json({ message: CURP_FORMAT_MESSAGE });
+        }
+        const dup = await findSchemeByCurp(cols.curp, id);
+        if (dup) return duplicateCurpResponse(res, dup);
+      }
     }
 
     const setClause = Object.keys(cols).map(c => `${c} = ?`).join(', ');
@@ -276,6 +344,10 @@ export const update = async (req, res) => {
 
     res.json(parseRow(updated[0]));
   } catch (err) {
+    if (err.code === 'ER_DUP_ENTRY') {
+      const dup = await findSchemeByCurp(normalizeCurp(req.body.curp), req.params.id).catch(() => null);
+      if (dup) return duplicateCurpResponse(res, dup);
+    }
     console.error('[paymentsGest] update error:', err);
     console.error('Error stack:', err.stack);
     res.status(500).json({
@@ -357,5 +429,38 @@ export const updateStatus = async (req, res) => {
       message: 'Error al actualizar el status',
       error: process.env.NODE_ENV === 'development' ? err.message : undefined,
     });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /api/payments-gest/curp-lookup/:curp
+// Used by BOTH the payments form and SORT_GES to see what already exists for a
+// CURP: the payment scheme (if any) and the SORT_GES candidate (if any).
+// ─────────────────────────────────────────────────────────────────────────────
+export const curpLookup = async (req, res) => {
+  if (!req.session?.user) return res.status(401).json({ message: 'Unauthorized' });
+  try {
+    const curp = normalizeCurp(req.params.curp);
+    if (!isValidCurp(curp)) {
+      return res.json({ curp, valid: false, scheme: null, candidate: null });
+    }
+
+    const scheme = await findSchemeByCurp(curp);
+
+    const [cands] = await pool.execute(
+      `SELECT c.id, c.ip_responsable, a.nombre_completo, a.esquema_ofrecido,
+              a.banco, a.clabe_interbancaria, a.fecha_ultima_menstruacion
+         FROM sort_ges_alta_gesca a
+         JOIN sort_ges_candidates c ON c.id = a.candidate_id
+        WHERE a.curp = ?
+        ORDER BY c.id ASC
+        LIMIT 1`,
+      [curp]
+    );
+
+    res.json({ curp, valid: true, scheme, candidate: cands[0] || null });
+  } catch (err) {
+    console.error('[paymentsGest] curpLookup error:', err);
+    res.status(500).json({ message: 'Error al buscar la CURP' });
   }
 };

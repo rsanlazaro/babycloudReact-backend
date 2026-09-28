@@ -5,6 +5,9 @@ import {
   logUpdate,
   logDelete,
 } from '../services/activityLogger.js';
+import { normalizeCurp, isValidCurp, CURP_FORMAT_MESSAGE, parseSchemeAmount, VALID_SCHEMES } from '../services/curp.js';
+import { JSON_FIELDS as PAYMENTS_JSON_FIELDS } from './paymentsGest.controller.js';
+import { insertCandidate, buildAltaGescaFields } from '../services/sortGesRecords.js';
 
 // ─────────────────────────────────────────────────────────────
 // Helpers
@@ -83,22 +86,8 @@ export const createCandidate = async (req, res) => {
   const { status = 'iniciales', ip_responsable, programa, foto_url, vinculo } = req.body;
   const today = new Date();
   try {
-    const [result] = await pool.query(
-      'INSERT INTO sort_ges_candidates (status, ip_responsable, programa, foto_url, vinculo) VALUES (?, ?, ?, ?, ?)',
-      [status, ip_responsable || null, programa || null, foto_url || null, vinculo || null]
-    );
-    const newId = result.insertId;
-
-    // Seed the 7 fixed psico_inicial rows
-    const etapas = [
-      'Entrevista admisión', 'Psicométrico', 'Estudios Socio Económicos',
-      'HIM 1', 'HIM 2', 'HIM 3', 'HIM 4',
-    ];
-    const psicoValues = etapas.map((etapa, i) => [newId, etapa, i + 1]);
-    await pool.query(
-      'INSERT INTO sort_ges_psico_inicial (candidate_id, etapa, etapa_orden) VALUES ?',
-      [psicoValues]
-    );
+    // Candidate + the 7 fixed psico_inicial rows (shared with Listado de pagos)
+    const newId = await insertCandidate(pool, { status, ip_responsable, programa, foto_url, vinculo });
 
     await logCreate(
       req.session.user.id, 'progestor',
@@ -239,53 +228,7 @@ export const upsertAltaGesca = async (req, res) => {
   if (!requireSession(req, res)) return;
   const { candidateId } = req.params;
   const today = new Date();
-  const {
-    nombre_completo, curp, rfc, esquema_ofrecido, tel_1, tel_2, email,
-    estado_civil, rni, fecha_nacimiento, banco, clabe_interbancaria,
-    direccion, numero, postal, alcaldia_municipio, estado, ocupacion,
-    tipo_sangre, peso, altura, imc, imc_clasificacion,
-    fumador, fumador_desde, metodo_aco, tiempo_metodo_aco,
-    embarazos, cesareas, partos, abortos, hijos,
-    fecha_ultima_menstruacion, ultima_cesarea, locked_fields,
-  } = req.body;
-
-  const fields = {
-    nombre_completo: nombre_completo || null,
-    curp: curp || null,
-    rfc: rfc || null,
-    esquema_ofrecido: esquema_ofrecido || null,
-    tel_1: tel_1 || null,
-    tel_2: tel_2 || null,
-    email: email || null,
-    estado_civil: estado_civil || null,
-    rni: rni || null,
-    fecha_nacimiento: fecha_nacimiento || null,
-    banco: banco || null,
-    clabe_interbancaria: clabe_interbancaria || null,
-    direccion: direccion || null,
-    numero: numero || null,
-    postal: postal || null,
-    alcaldia_municipio: alcaldia_municipio || null,
-    estado: estado || null,
-    ocupacion: ocupacion || null,
-    tipo_sangre: tipo_sangre || null,
-    peso: peso || null,
-    altura: altura || null,
-    imc: imc || null,
-    imc_clasificacion: imc_clasificacion || null,
-    fumador: fumador ? 1 : 0,
-    fumador_desde: fumador_desde || null,
-    metodo_aco: metodo_aco || null,
-    tiempo_metodo_aco: tiempo_metodo_aco || null,
-    embarazos: embarazos || 0,
-    cesareas: cesareas || 0,
-    partos: partos || 0,
-    abortos: abortos || 0,
-    hijos: hijos || 0,
-    fecha_ultima_menstruacion: fecha_ultima_menstruacion || null,
-    ultima_cesarea: ultima_cesarea || null,
-    locked_fields: locked_fields ? JSON.stringify(locked_fields) : null,
-  };
+  const fields = buildAltaGescaFields(req.body);
 
   try {
     const [existing] = await pool.query(
@@ -976,4 +919,127 @@ export const deleteCitaPrevia = async (req, res) => {
     );
     res.json({ success: true });
   } catch (err) { serverError(res, err, 'deleteCitaPrevia'); }
+};
+
+// ─────────────────────────────────────────────────────────────
+// Fill empty values for NOT NULL columns (without a DB default):
+//  - JSON columns → the JSON literal 'null'. Valid JSON, so it passes
+//    MariaDB's CHECK (json_valid(...)) on JSON columns, and the payments form
+//    treats it as "not set yet" and uses its own starting values, then saves
+//    the real ones on the first edit. The list reads it as "no stage paid".
+//  - text / dates → '' (what the payments form sends for empty fields)
+//  - numbers → 0
+// Candidate data is often incomplete (no IP, bank…) and those columns may
+// not accept NULL.
+// ─────────────────────────────────────────────────────────────
+const TEXT_TYPES = ['char', 'varchar', 'tinytext', 'text', 'mediumtext', 'longtext', 'enum', 'set'];
+const NUMBER_TYPES = ['tinyint', 'smallint', 'mediumint', 'int', 'integer', 'bigint', 'decimal', 'float', 'double', 'bit'];
+const DATE_TYPES = ['date', 'datetime', 'timestamp'];
+
+const withRequiredDefaults = async (table, values, jsonColumns = []) => {
+  const [required] = await pool.query(
+    `SELECT COLUMN_NAME AS name, DATA_TYPE AS type
+       FROM information_schema.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?
+        AND IS_NULLABLE = 'NO' AND COLUMN_DEFAULT IS NULL
+        AND EXTRA NOT LIKE '%auto_increment%'`,
+    [table]
+  );
+  const row = { ...values };
+  required.forEach(({ name, type }) => {
+    if (row[name] !== null && row[name] !== undefined) return;
+    const t = String(type).toLowerCase();
+    // MariaDB reports JSON columns as 'longtext', so check the known JSON list first
+    if (jsonColumns.includes(name) || t === 'json') row[name] = 'null';
+    else if (TEXT_TYPES.includes(t) || DATE_TYPES.includes(t)) row[name] = '';
+    else if (NUMBER_TYPES.includes(t)) row[name] = 0;
+  });
+  return row;
+};
+
+// ═════════════════════════════════════════════════════════════
+// PAYMENT SCHEME (link with Listado de pagos — payments_gest)
+// POST /api/sort-ges/:candidateId/payment-scheme
+//
+// Creates the payment scheme from the candidate's SAVED Alta Gesca data.
+// CURP is the link: if a scheme already exists for that CURP (created here
+// or from Listado de pagos), that one is returned — never a duplicate.
+// ═════════════════════════════════════════════════════════════
+export const createPaymentScheme = async (req, res) => {
+  if (!requireSession(req, res)) return;
+  const { candidateId } = req.params;
+  try {
+    const [cands] = await pool.query(
+      `SELECT c.id, c.ip_responsable,
+              a.nombre_completo, a.curp, a.esquema_ofrecido,
+              a.banco, a.clabe_interbancaria, a.fecha_ultima_menstruacion
+         FROM sort_ges_candidates c
+         LEFT JOIN sort_ges_alta_gesca a ON a.candidate_id = c.id
+        WHERE c.id = ?`,
+      [candidateId]
+    );
+    if (!cands.length) return notFound(res, 'Candidate');
+    const cand = cands[0];
+
+    const curp = normalizeCurp(cand.curp);
+    if (!curp) {
+      return res.status(400).json({ message: 'Captura y guarda la CURP antes de generar el esquema' });
+    }
+    if (!isValidCurp(curp)) {
+      return res.status(400).json({ message: CURP_FORMAT_MESSAGE });
+    }
+    if (!cand.nombre_completo) {
+      return res.status(400).json({ message: 'Captura el nombre completo antes de generar el esquema' });
+    }
+    const schemeValue = parseSchemeAmount(cand.esquema_ofrecido);
+    if (!VALID_SCHEMES.includes(schemeValue)) {
+      return res.status(400).json({ message: 'Selecciona un esquema ofrecido válido antes de generar el esquema' });
+    }
+
+    // Already exists for this CURP → link to it instead of creating another
+    const [existing] = await pool.query(
+      'SELECT id, gesca FROM payments_gest WHERE curp = ? LIMIT 1', [curp]
+    );
+    if (existing.length) {
+      return res.json({ id: existing[0].id, gesca: existing[0].gesca, created: false });
+    }
+
+    const row = await withRequiredDefaults('payments_gest', {
+      gesca:        cand.nombre_completo,
+      curp,
+      ip:           cand.ip_responsable || null,
+      banco:        cand.banco || null,
+      clabe:        cand.clabe_interbancaria || null,
+      fum:          cand.fecha_ultima_menstruacion || null,
+      scheme_value: schemeValue,
+      status:       'active',
+    }, PAYMENTS_JSON_FIELDS);
+
+    let insertId;
+    try {
+      const cols = Object.keys(row);
+      const [result] = await pool.query(
+        `INSERT INTO payments_gest (${cols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`,
+        Object.values(row)
+      );
+      insertId = result.insertId;
+    } catch (err) {
+      // Created from Listado de pagos at the same moment → return that one
+      if (err.code === 'ER_DUP_ENTRY') {
+        const [dup] = await pool.query('SELECT id, gesca FROM payments_gest WHERE curp = ? LIMIT 1', [curp]);
+        if (dup.length) return res.json({ id: dup[0].id, gesca: dup[0].gesca, created: false });
+      }
+      throw err;
+    }
+
+    await logCreate(
+      req.session.user.id,
+      'progestor',
+      `Creó registro de pagos - ${cand.nombre_completo} (desde SORT_GES #${candidateId})`,
+      new Date(),
+      { paymentsGestId: insertId, gesca: cand.nombre_completo, sortGesCandidateId: Number(candidateId) }
+    );
+
+    res.status(201).json({ id: insertId, gesca: cand.nombre_completo, created: true });
+  } catch (err) { serverError(res, err, 'createPaymentScheme'); }
 };
