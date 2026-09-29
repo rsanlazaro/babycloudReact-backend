@@ -10,10 +10,18 @@ export const isEnabled = (value) => {
 
 export const login = async (req, res) => {
   const today = new Date();
-  const { username, password } = req.body;
+  const { password } = req.body;
+  // Login is by EMAIL only. `username` is still read so an older frontend
+  // doesn't break, but its value must be an email too.
+  const email = String(req.body.email ?? req.body.username ?? '').trim();
 
-  if (!username || !password) {
-    return res.status(400).json({ message: 'Username and password are required' });
+  if (!email || !password) {
+    return res.status(400).json({ message: 'Correo electrónico y contraseña son obligatorios' });
+  }
+  if (!email.includes('@')) {
+    return res.status(400).json({
+      message: 'Inicia sesión con tu correo electrónico completo, no con tu nombre de usuario',
+    });
   }
 
   try {
@@ -31,17 +39,17 @@ export const login = async (req, res) => {
         enabled,
         ${accessColumns}
        FROM users
-       WHERE username = ? OR mail = ?`,
-      [username, username]
+       WHERE LOWER(TRIM(mail)) = LOWER(?)`,
+      [email]
     );
 
     // Only a users row whose password matches (plain text for now) counts.
     // If it's missing or disabled, fall through to the guests table instead of
-    // stopping here — a username/mail shared with a guest must not block them.
+    // stopping here — a mail shared with a guest must not block them.
     const user = rows.find((r) => r.password === password);
 
     if (!user || !isEnabled(user.enabled)) {
-      return loginAsGuest(req, res, username, password, !!user);
+      return loginAsGuest(req, res, email, password, !!user);
     }
 
     // Extract permissions (access_1 to access_95)
@@ -119,12 +127,12 @@ export const login = async (req, res) => {
 // rejected everywhere by default. Only endpoints that explicitly opt in
 // (see cloudIps getRegister) let a guest through.
 // disabledUserMatched: a users row matched the password but is disabled
-const loginAsGuest = async (req, res, username, password, disabledUserMatched = false) => {
+const loginAsGuest = async (req, res, email, password, disabledUserMatched = false) => {
   const [rows] = await pool.query(
     `SELECT id, username, mail, password, profile, enabled
        FROM guests
-      WHERE username = ? OR mail = ?`,
-    [username, username]
+      WHERE LOWER(TRIM(mail)) = LOWER(?)`,
+    [email]
   );
 
   // Plain text for now, same as users

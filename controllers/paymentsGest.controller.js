@@ -5,6 +5,9 @@ import pool from '../db.js';
 import { logCreate, logUpdate, logDelete } from '../services/activityLogger.js';
 import { normalizeCurp, isValidCurp, CURP_FORMAT_MESSAGE } from '../services/curp.js';
 import { ensureCandidateForPayment } from '../services/sortGesRecords.js';
+import {
+  DEFAULT_CONTRACT, CONTRACTS, isValidContract, isSchemeInContract, formatSchemeForMessage,
+} from '../services/contracts.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -33,7 +36,7 @@ export const JSON_FIELDS = [
 const SCALAR_FIELDS = [
   'gesca', 'curp', 'ip', 'banco', 'clabe', 'country',
   'insurance', 'policy', 'manager', 'fum', 'giro_semana',
-  'scheme_value', 'status',
+  'scheme_value', 'contrato', 'status',
   'bono_vih', 'bono_gemelar',
   'parc_count',
   'ayuda_maternidad', 'ayuda_amount',
@@ -71,6 +74,18 @@ async function findSchemeByCurp(curp, excludeId = null) {
   if (excludeId) { sql += ' AND id <> ?'; params.push(excludeId); }
   const [rows] = await pool.execute(`${sql} LIMIT 1`, params);
   return rows[0] || null;
+}
+
+/** null when contract + scheme are a valid pair, otherwise the error message */
+function contractSchemeError(contrato, schemeValue) {
+  if (!isValidContract(contrato)) {
+    return `Contrato inválido. Opciones: ${CONTRACTS.join(', ')}`;
+  }
+  if (schemeValue !== null && schemeValue !== undefined && schemeValue !== ''
+      && !Number.isNaN(Number(schemeValue)) && !isSchemeInContract(contrato, schemeValue)) {
+    return `El esquema ${formatSchemeForMessage(schemeValue)} no pertenece al contrato ${contrato}`;
+  }
+  return null;
 }
 
 const duplicateCurpResponse = (res, existing) =>
@@ -141,7 +156,7 @@ export const getAll = async (req, res) => {
     //    server versions — causes ER_WRONG_ARGUMENTS.
     //    The values are already sanitized integers so this is safe.
     const [rows] = await pool.execute(
-      `SELECT id, gesca, curp, ip, country, scheme_value, status, manager,
+      `SELECT id, gesca, curp, ip, country, scheme_value, contrato, status, manager,
               ayuda_maternidad, ayuda_amount, row_states, puerperio_states, created_at, updated_at
        FROM payments_gest
        ${whereClause}
@@ -217,7 +232,11 @@ export const create = async (req, res) => {
     const dup = await findSchemeByCurp(curp);
     if (dup) return duplicateCurpResponse(res, dup);
 
-    const cols = buildColumnMap(body);
+    const contrato = body.contrato || DEFAULT_CONTRACT;
+    const contractErr = contractSchemeError(contrato, body.scheme_value);
+    if (contractErr) return res.status(400).json({ message: contractErr });
+
+    const cols = buildColumnMap({ ...body, contrato });
 
     if (!Object.keys(cols).length) {
       return res.status(400).json({ message: 'No se proporcionaron datos' });
@@ -288,7 +307,7 @@ export const update = async (req, res) => {
       : [];
 
     const [existing] = await pool.execute(
-      'SELECT id, gesca, curp FROM payments_gest WHERE id = ?',
+      'SELECT id, gesca, curp, contrato, scheme_value FROM payments_gest WHERE id = ?',
       [id]
     );
     if (!existing.length) {
@@ -299,6 +318,14 @@ export const update = async (req, res) => {
 
     if (!Object.keys(cols).length) {
       return res.status(400).json({ message: 'No se proporcionaron datos para actualizar' });
+    }
+
+    if ('contrato' in cols || 'scheme_value' in cols) {
+      const contrato = cols.contrato || existing[0].contrato || DEFAULT_CONTRACT;
+      const schemeValue = 'scheme_value' in cols ? cols.scheme_value : existing[0].scheme_value;
+      const contractErr = contractSchemeError(contrato, schemeValue);
+      if (contractErr) return res.status(400).json({ message: contractErr });
+      if ('contrato' in cols) cols.contrato = contrato;
     }
 
     if ('curp' in cols) {

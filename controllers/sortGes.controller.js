@@ -5,7 +5,8 @@ import {
   logUpdate,
   logDelete,
 } from '../services/activityLogger.js';
-import { normalizeCurp, isValidCurp, CURP_FORMAT_MESSAGE, parseSchemeAmount, VALID_SCHEMES } from '../services/curp.js';
+import { normalizeCurp, isValidCurp, CURP_FORMAT_MESSAGE, parseSchemeAmount } from '../services/curp.js';
+import { contractForScheme } from '../services/contracts.js';
 import { JSON_FIELDS as PAYMENTS_JSON_FIELDS } from './paymentsGest.controller.js';
 import { insertCandidate, buildAltaGescaFields } from '../services/sortGesRecords.js';
 
@@ -992,7 +993,9 @@ export const createPaymentScheme = async (req, res) => {
       return res.status(400).json({ message: 'Captura el nombre completo antes de generar el esquema' });
     }
     const schemeValue = parseSchemeAmount(cand.esquema_ofrecido);
-    if (!VALID_SCHEMES.includes(schemeValue)) {
+    // "Esquema ofrecido" must be a scheme of some contract (today: Babyboom)
+    const contrato = contractForScheme(schemeValue);
+    if (!contrato) {
       return res.status(400).json({ message: 'Selecciona un esquema ofrecido válido antes de generar el esquema' });
     }
 
@@ -1012,6 +1015,7 @@ export const createPaymentScheme = async (req, res) => {
       clabe:        cand.clabe_interbancaria || null,
       fum:          cand.fecha_ultima_menstruacion || null,
       scheme_value: schemeValue,
+      contrato,
       status:       'active',
     }, PAYMENTS_JSON_FIELDS);
 

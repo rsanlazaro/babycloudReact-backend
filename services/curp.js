@@ -28,5 +28,4 @@ export const parseSchemeAmount = (value) => {
   return Number.isFinite(n) ? n : null;
 };
 
-/** Scheme values the payments form knows how to calculate */
-export const VALID_SCHEMES = [375000, 400000, 450000, 475000];
+// Scheme values per contract live in services/contracts.js
