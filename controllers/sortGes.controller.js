@@ -9,6 +9,9 @@ import { normalizeCurp, isValidCurp, CURP_FORMAT_MESSAGE, parseSchemeAmount } fr
 import { contractForScheme } from '../services/contracts.js';
 import { JSON_FIELDS as PAYMENTS_JSON_FIELDS } from './paymentsGest.controller.js';
 import { insertCandidate, buildAltaGescaFields } from '../services/sortGesRecords.js';
+import {
+  computeSolicitud, computeStatusGral, computePago, computeAnio, nextCuota,
+} from '../services/seguroStatus.js';
 
 // ─────────────────────────────────────────────────────────────
 // Helpers
@@ -491,6 +494,61 @@ export const deleteSeguroVidaPago = async (req, res) => {
 // TAB 3 — SEGURO DE MATERNIDAD
 // ═════════════════════════════════════════════════════════════
 
+// ═════════════════════════════════════════════════════════════
+// LISTADO DE SEGUROS (Baby site) — all policies of all gestantes
+// GET /api/sort-ges/seguros
+// Same data as each register's "Seguro med" tab, plus computed columns
+// (rules in services/seguroStatus.js).
+// ═════════════════════════════════════════════════════════════
+export const getAllSeguros = async (req, res) => {
+  if (!requireSession(req, res)) return;
+  try {
+    const [policies] = await pool.query(
+      `SELECT s.id, s.candidate_id, s.aseguradora, s.numero_poliza,
+              s.fecha_solicitud, s.fecha_alta, s.fecha_vencimiento, s.created_at,
+              a.nombre_completo
+         FROM sort_ges_seguro_mat s
+         LEFT JOIN sort_ges_alta_gesca a ON a.candidate_id = s.candidate_id
+        ORDER BY s.created_at DESC`
+    );
+
+    // All payments in one query (not one per policy)
+    const byPolicy = {};
+    if (policies.length) {
+      const [cuotas] = await pool.query(
+        `SELECT seguro_mat_id, cuota_num, total_cuotas, vencimiento, fecha_pago, status
+           FROM sort_ges_seguro_mat_cuotas
+          WHERE seguro_mat_id IN (?)
+          ORDER BY cuota_num ASC`,
+        [policies.map(p => p.id)]
+      );
+      cuotas.forEach(c => { (byPolicy[c.seguro_mat_id] ||= []).push(c); });
+    }
+
+    res.json(policies.map(p => {
+      const cuotas = byPolicy[p.id] || [];
+      const next = nextCuota(cuotas);
+      const pago = computePago(cuotas);
+      return {
+        id: p.id,
+        candidate_id: p.candidate_id,
+        gestante: p.nombre_completo || `Candidato #${p.candidate_id}`,
+        aseguradora: p.aseguradora,
+        numero_poliza: p.numero_poliza,
+        fecha_solicitud: p.fecha_solicitud,
+        start_poliza: p.fecha_alta,
+        fecha_vencimiento: p.fecha_vencimiento,
+        solicitud: computeSolicitud(p),
+        status_gral: computeStatusGral(p, cuotas),
+        prox_pago: next?.vencimiento || null,
+        pago: pago.texto,
+        liquidado: pago.liquidado,
+        anio: computeAnio(p),
+      };
+    }));
+  } catch (err) { serverError(res, err, 'getAllSeguros'); }
+};
+
 export const getSeguroMatList = async (req, res) => {
   if (!requireSession(req, res)) return;
   const { candidateId } = req.params;
@@ -617,14 +675,24 @@ export const deleteSeguroMat = async (req, res) => {
   if (!requireSession(req, res)) return;
   const { id } = req.params;
   const today = new Date();
+  const conn = await pool.getConnection();
   try {
-    await pool.query('DELETE FROM sort_ges_seguro_mat WHERE id = ?', [id]);
+    // Its payments go with it (same transaction: all or nothing)
+    await conn.beginTransaction();
+    await conn.query('DELETE FROM sort_ges_seguro_mat_cuotas WHERE seguro_mat_id = ?', [id]);
+    await conn.query('DELETE FROM sort_ges_seguro_mat WHERE id = ?', [id]);
+    await conn.commit();
     await logDelete(
       req.session.user.id, 'progestor',
-      `Eliminó Seguro Maternidad #${id}`, today, `${id}`
+      `Eliminó Seguro Gastos Médicos Mayores #${id}`, today, `${id}`
     );
     res.json({ success: true });
-  } catch (err) { serverError(res, err, 'deleteSeguroMat'); }
+  } catch (err) {
+    await conn.rollback().catch(() => {});
+    serverError(res, err, 'deleteSeguroMat');
+  } finally {
+    conn.release();
+  }
 };
 
 export const updateCuotaPago = async (req, res) => {
@@ -1039,7 +1107,7 @@ export const createPaymentScheme = async (req, res) => {
     await logCreate(
       req.session.user.id,
       'progestor',
-      `Creó registro de pagos - ${cand.nombre_completo} (desde SORT_GES #${candidateId})`,
+      `Creó registro de pagos - ${cand.nombre_completo} (desde Sort_GESCA #${candidateId})`,
       new Date(),
       { paymentsGestId: insertId, gesca: cand.nombre_completo, sortGesCandidateId: Number(candidateId) }
     );

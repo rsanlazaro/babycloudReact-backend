@@ -100,7 +100,7 @@ export const formatEsquema = (value) => {
  */
 export const ensureCandidateForPayment = async (payment, userId) => {
   const curp = normalizeCurp(payment.curp);
-  if (!isValidCurp(curp)) throw new Error('CURP inválida para crear el registro en SORT_GES');
+  if (!isValidCurp(curp)) throw new Error('CURP inválida para crear el registro en Sort_GESCA');
 
   const [found] = await pool.query(
     'SELECT candidate_id AS id FROM sort_ges_alta_gesca WHERE curp = ? ORDER BY candidate_id ASC LIMIT 1',

@@ -274,7 +274,7 @@ export const create = async (req, res) => {
       created._sortGes = sortGes; // { id, created }
     } catch (linkErr) {
       console.error('[paymentsGest] could not create SORT_GES register:', linkErr);
-      created._sortGesError = 'El esquema se creó, pero no se pudo crear su registro en SORT_GES';
+      created._sortGesError = 'El esquema se creó, pero no se pudo crear su registro en Sort_GESCA';
     }
 
     res.status(201).json(created);

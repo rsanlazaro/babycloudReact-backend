@@ -13,12 +13,14 @@ import {
   getSeguimientoList, createSeguimiento, updateSeguimiento, deleteSeguimiento,
   getCitaPreviaList, createCitaPrevia, updateCitaPrevia, deleteCitaPrevia,
   createPaymentScheme,
+  getAllSeguros,
 } from '../controllers/sortGes.controller.js';
 
 const router = Router();
 
 // ── Candidates ───────────────────────────────────────────────
 router.get('/',           getAllCandidates);
+router.get('/seguros',    getAllSeguros);   // Listado de seguros — must be before '/:id'
 router.post('/',          createCandidate);
 router.get('/:id',        getCandidate);
 router.put('/:id/foto',   updateCandidateFoto);

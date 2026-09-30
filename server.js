@@ -20,7 +20,10 @@ import programRoutes from './routes/program.routes.js';
 import paymentsGestRoutes from './routes/paymentsGest.routes.js';
 import cloudIpsRoutes from './routes/cloudIps.routes.js';
 import sortGesRoutes from './routes/sortGes.routes.js';
+import sortIpRoutes from './routes/sortIp.routes.js';
 import pnotesRoutes from './routes/pnotes.routes.js';
+import pool from './db.js';
+import { ensureSchema } from './migrations/ensureSchema.js';
 
 const app = express();
 
@@ -83,6 +86,7 @@ app.use('/api/programs', programRoutes);
 app.use('/api/payments-gest', paymentsGestRoutes);
 app.use('/api/babycloud/ips-register', cloudIpsRoutes);
 app.use('/api/sort-ges', sortGesRoutes);
+app.use('/api/sort-ip', sortIpRoutes);
 app.use('/api/pnotes', pnotesRoutes);
 
 // Serve static files from React build
@@ -92,5 +96,14 @@ app.use(express.static(path.join(__dirname, 'build')));
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'build', 'index.html'));
 });
+
+// Apply pending schema changes (CURP link) on the database in .env before serving.
+// If it fails (e.g. the DB user lacks ALTER permission) the server still starts
+// and the error explains what to fix.
+try {
+  await ensureSchema(pool);
+} catch (err) {
+  console.error('[schema] Could not apply schema changes:', err.message);
+}
 
 app.listen(4000, () => console.log("Server running"));

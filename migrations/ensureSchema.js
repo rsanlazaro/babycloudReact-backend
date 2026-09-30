@@ -71,5 +71,41 @@ export const ensureSchema = async (pool) => {
     console.log(`${tag} added column payments_gest.contrato (existing schemes set to Babyboom)`);
   }
 
-  console.log(`${tag} schema OK (CURP link, contrato)`);
+  // 6. Sort_IPS tables (created once; IF NOT EXISTS makes this safe on every start)
+  const tableExists = async (table) => {
+    const [rows] = await pool.query(
+      'SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?', [table]
+    );
+    return rows.length > 0;
+  };
+  if (!(await tableExists('sort_ip_candidates'))) {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS sort_ip_candidates (
+        id              INT AUTO_INCREMENT PRIMARY KEY,
+        nombre_completo VARCHAR(200) NOT NULL,
+        guest_id        INT NULL,                        -- Cloud IPS login (guests.id), optional
+        status          VARCHAR(30) NOT NULL DEFAULT 'activo',
+        created_by      INT NULL,
+        created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY uq_sort_ip_guest (guest_id)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+    console.log(`${tag} created table sort_ip_candidates`);
+  }
+  if (!(await tableExists('sort_ip_sections'))) {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS sort_ip_sections (
+        candidate_id INT NOT NULL,
+        section      VARCHAR(30) NOT NULL,               -- alta | checklist | crio | preparacion | programa
+        data         LONGTEXT NULL,                      -- JSON with that tab's fields
+        updated_by   INT NULL,
+        updated_at   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        PRIMARY KEY (candidate_id, section),
+        CONSTRAINT fk_sort_ip_sections_candidate
+          FOREIGN KEY (candidate_id) REFERENCES sort_ip_candidates (id) ON DELETE CASCADE
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+    console.log(`${tag} created table sort_ip_sections`);
+  }
+
+  console.log(`${tag} schema OK (CURP link, contrato, Sort_IPS)`);
 };
