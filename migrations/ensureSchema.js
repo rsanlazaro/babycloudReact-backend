@@ -23,20 +23,50 @@ const indexExists = async (pool, table, index) => {
   return rows.length > 0;
 };
 
+const columnType = async (pool, table, column) => {
+  const [rows] = await pool.query(
+    `SELECT DATA_TYPE AS type FROM information_schema.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?`,
+    [table, column]
+  );
+  return rows[0]?.type ? String(rows[0].type).toLowerCase() : null;
+};
+
+// TEXT/BLOB columns need a prefix length to be indexed
+const indexColumn = async (pool, table, column, prefix) => {
+  const t = await columnType(pool, table, column);
+  return t && /text|blob/.test(t) ? `${column}(${prefix})` : column;
+};
+
 export const ensureSchema = async (pool) => {
   const [[{ db }]] = await pool.query('SELECT DATABASE() AS db');
   const tag = `[schema:${db}]`;
 
+  // Each step runs on its own: if one fails, the others still run and the
+  // console says exactly which one failed and why.
+  const failed = [];
+  const step = async (name, fn) => {
+    try { await fn(); }
+    catch (err) {
+      failed.push(name);
+      console.error(`${tag} ✗ ${name}: ${err.code || ''} ${err.sqlMessage || err.message}`);
+    }
+  };
+
   // 1. payments_gest.curp
+  await step('payments_gest.curp', async () => {
   if (!(await columnExists(pool, 'payments_gest', 'curp'))) {
     await pool.query('ALTER TABLE payments_gest ADD COLUMN curp VARCHAR(18) NULL AFTER gesca');
     console.log(`${tag} added column payments_gest.curp`);
   }
+  });
 
   // 2. One payment scheme per CURP (NULLs allowed for older registers)
-  if (!(await indexExists(pool, 'payments_gest', 'uq_payments_gest_curp'))) {
+  if ((await columnExists(pool, 'payments_gest', 'curp'))
+      && !(await indexExists(pool, 'payments_gest', 'uq_payments_gest_curp'))) {
     try {
-      await pool.query('ALTER TABLE payments_gest ADD UNIQUE KEY uq_payments_gest_curp (curp)');
+      const col = await indexColumn(pool, 'payments_gest', 'curp', 18);
+      await pool.query(`ALTER TABLE payments_gest ADD UNIQUE KEY uq_payments_gest_curp (${col})`);
       console.log(`${tag} added unique key payments_gest.curp`);
     } catch (err) {
       // Only possible if duplicated CURPs were already typed in by hand
@@ -47,6 +77,7 @@ export const ensureSchema = async (pool) => {
 
   // 3. SORT_GES CURPs normalized (uppercase, no spaces) so lookups match.
   //    BINARY so lowercase values are detected despite case-insensitive collations.
+  await step('sort_ges_alta_gesca.curp (normalize + index)', async () => {
   if (await columnExists(pool, 'sort_ges_alta_gesca', 'curp')) {
     const [r] = await pool.query(
       `UPDATE sort_ges_alta_gesca
@@ -58,21 +89,26 @@ export const ensureSchema = async (pool) => {
 
     // 4. Faster CURP lookups
     if (!(await indexExists(pool, 'sort_ges_alta_gesca', 'idx_sort_ges_alta_gesca_curp'))) {
-      await pool.query('CREATE INDEX idx_sort_ges_alta_gesca_curp ON sort_ges_alta_gesca (curp)');
+      const col = await indexColumn(pool, 'sort_ges_alta_gesca', 'curp', 18);
+      await pool.query(`CREATE INDEX idx_sort_ges_alta_gesca_curp ON sort_ges_alta_gesca (${col})`);
       console.log(`${tag} added index sort_ges_alta_gesca.curp`);
     }
   }
+  });
 
   // 5. Contract per payment scheme (Babyboom | Nora). Existing rows → Babyboom.
+  await step('payments_gest.contrato', async () => {
   if (!(await columnExists(pool, 'payments_gest', 'contrato'))) {
     await pool.query(
       "ALTER TABLE payments_gest ADD COLUMN contrato VARCHAR(30) NOT NULL DEFAULT 'Babyboom' AFTER scheme_value"
     );
     console.log(`${tag} added column payments_gest.contrato (existing schemes set to Babyboom)`);
   }
+  });
 
   // 6. Cita previa redesign (Sort_GESCA → Cita previa): citas vs laboratorios,
   //    resolución, incidencia and the "No acudió" history.
+  await step('sort_ges_cita_previa (tipo, resolucion, incidencia, no_acudio, motivo)', async () => {
   if (await columnExists(pool, 'sort_ges_cita_previa', 'sub_tab')) {
     const citaCols = [
       ['tipo',       "VARCHAR(20) NOT NULL DEFAULT 'cita'"],   // 'cita' | 'laboratorio'
@@ -97,6 +133,7 @@ export const ensureSchema = async (pool) => {
       console.log(`${tag} widened sort_ges_cita_previa.motivo to VARCHAR(80)`);
     }
   }
+  });
 
   // 7. Sort_IPS tables (created once; IF NOT EXISTS makes this safe on every start)
   const tableExists = async (table) => {
@@ -105,6 +142,7 @@ export const ensureSchema = async (pool) => {
     );
     return rows.length > 0;
   };
+  await step('sort_ip_candidates', async () => {
   if (!(await tableExists('sort_ip_candidates'))) {
     await pool.query(`
       CREATE TABLE IF NOT EXISTS sort_ip_candidates (
@@ -119,6 +157,8 @@ export const ensureSchema = async (pool) => {
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
     console.log(`${tag} created table sort_ip_candidates`);
   }
+  });
+  await step('sort_ip_sections', async () => {
   if (!(await tableExists('sort_ip_sections'))) {
     await pool.query(`
       CREATE TABLE IF NOT EXISTS sort_ip_sections (
@@ -133,6 +173,12 @@ export const ensureSchema = async (pool) => {
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
     console.log(`${tag} created table sort_ip_sections`);
   }
+  });
 
-  console.log(`${tag} schema OK (CURP link, contrato, Sort_IPS)`);
+  if (failed.length) {
+    console.error(`${tag} ⚠ ${failed.length} step(s) failed: ${failed.join(' | ')} — ` +
+      'creating registers that use them will fail with 500 until fixed.');
+  } else {
+    console.log(`${tag} schema OK (CURP link, contrato, cita previa, Sort_IPS)`);
+  }
 };
