@@ -14,6 +14,7 @@ import {
   getCitaPreviaList, createCitaPrevia, updateCitaPrevia, deleteCitaPrevia,
   createPaymentScheme,
   getAllSeguros,
+  sendSeguroSolicitud,
 } from '../controllers/sortGes.controller.js';
 
 const router = Router();
@@ -31,6 +32,7 @@ router.delete('/:id',     deleteCandidate);
 // ── Tab 1: Alta GESCA ────────────────────────────────────────
 router.get('/:candidateId/alta-gesca', getAltaGesca);
 router.post('/:candidateId/payment-scheme', createPaymentScheme); // link with Listado de pagos (by CURP)
+router.post('/:candidateId/seguro-solicitud', sendSeguroSolicitud); // Admisiones → Listado de seguros
 router.put('/:candidateId/alta-gesca', upsertAltaGesca);
 
 // ── Tab 2: Checklist ─────────────────────────────────────────

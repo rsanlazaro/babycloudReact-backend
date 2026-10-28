@@ -1,5 +1,12 @@
 import cloudinary from '../config/cloudinary.js';
 import { logActivity, logUpdate, logCreate, logDelete, logLogin, logLogout, ACTIVITY_TYPES, ENTITY_TYPES } from '../services/activityLogger.js';
+import pool from '../db.js';
+import {
+  comprobanteFolder, comprobantePublicId, findCuota, destroyComprobante, pipeStoredPdf,
+} from '../services/seguroComprobantes.js';
+import {
+  DOC_KEY_REGEX, ipDocFolder, ipDocPublicId, ipExists, readDocs, writeDoc, destroyIpDoc,
+} from '../services/ipDocs.js';
 
 export const getUploadSignature = async (req, res) => {
   try {
@@ -231,5 +238,235 @@ export const getCandidateDocUploadSignature = async (req, res) => {
   } catch (err) {
     console.error('CANDIDATE DOC SIGNATURE ERROR:', err);
     res.status(500).json({ message: 'Signature generation failed' });
+  }
+};
+
+
+// ═════════════════════════════════════════════════════════════
+// Comprobante (PDF) of each registered payment — Seguro de Gastos Médicos Mayores
+// Folders and names: services/seguroComprobantes.js
+// ═════════════════════════════════════════════════════════════
+const parseCuotaQuery = (src) => {
+  const polizaId = Number(src.polizaId);
+  const cuotaNum = Number(src.cuotaNum);
+  return Number.isInteger(polizaId) && polizaId > 0 && Number.isInteger(cuotaNum) && cuotaNum > 0
+    ? { polizaId, cuotaNum } : null;
+};
+
+// GET /api/upload/seguro-pago-signature?polizaId&cuotaNum
+export const getSeguroPagoSignature = async (req, res) => {
+  if (!req.session?.user) return res.status(401).json({ message: 'Not authenticated' });
+  const q = parseCuotaQuery(req.query);
+  if (!q) return res.status(400).json({ message: 'polizaId y cuotaNum son obligatorios' });
+  try {
+    const cuota = await findCuota(q.polizaId, q.cuotaNum);
+    if (!cuota) return res.status(404).json({ message: 'Cuota no encontrada' });
+    if (!cuota.fecha_pago || cuota.status === 'cancelado') {
+      return res.status(400).json({ message: 'Solo se puede subir el comprobante de un pago registrado' });
+    }
+    const timestamp = Math.round(Date.now() / 1000);
+    const folder    = comprobanteFolder(cuota.candidate_id, q.polizaId);
+    const publicId  = comprobantePublicId(cuota.candidate_id, q.polizaId, q.cuotaNum);
+    // resource_type 'raw' goes in the upload URL, not in the signature
+    const signature = cloudinary.utils.api_sign_request(
+      { timestamp, public_id: publicId, asset_folder: folder, overwrite: true },
+      process.env.CLOUDINARY_API_SECRET
+    );
+    res.json({
+      timestamp, signature, publicId,
+      assetFolder: folder,
+      cloudName: process.env.CLOUDINARY_CLOUD_NAME,
+      apiKey:    process.env.CLOUDINARY_API_KEY,
+    });
+  } catch (err) {
+    console.error('SEGURO PAGO SIGNATURE ERROR:', err);
+    res.status(500).json({ message: 'Signature generation failed' });
+  }
+};
+
+// PUT /api/upload/seguro-pago-doc  { polizaId, cuotaNum, url } — saves the uploaded file's URL
+export const saveSeguroPagoDoc = async (req, res) => {
+  if (!req.session?.user) return res.status(401).json({ message: 'Not authenticated' });
+  const q = parseCuotaQuery(req.body || {});
+  const url = String(req.body?.url || '');
+  if (!q) return res.status(400).json({ message: 'polizaId y cuotaNum son obligatorios' });
+  // Only URLs of this Cloudinary account
+  if (!url.startsWith(`https://res.cloudinary.com/${process.env.CLOUDINARY_CLOUD_NAME}/`)) {
+    return res.status(400).json({ message: 'URL de comprobante inválida' });
+  }
+  try {
+    const cuota = await findCuota(q.polizaId, q.cuotaNum);
+    if (!cuota) return res.status(404).json({ message: 'Cuota no encontrada' });
+    await pool.query(
+      'UPDATE sort_ges_seguro_mat_cuotas SET comprobante_url = ? WHERE seguro_mat_id = ? AND cuota_num = ?',
+      [url, q.polizaId, q.cuotaNum]
+    );
+    await logUpdate(req.session.user.id, 'progestor',
+      `Subió comprobante de pago cuota ${q.cuotaNum} póliza #${q.polizaId}`, new Date(), `${q.polizaId}`);
+    res.json({ success: true, comprobante_url: url });
+  } catch (err) {
+    console.error('SAVE SEGURO PAGO DOC ERROR:', err);
+    res.status(500).json({ message: 'Error al guardar el comprobante' });
+  }
+};
+
+// GET /api/upload/seguro-pago-stream?polizaId&cuotaNum — opens the PDF
+export const streamSeguroPagoDoc = async (req, res) => {
+  if (!req.session?.user) return res.status(401).json({ message: 'Not authenticated' });
+  const q = parseCuotaQuery(req.query);
+  if (!q) return res.status(400).json({ message: 'polizaId y cuotaNum son obligatorios' });
+  try {
+    const cuota = await findCuota(q.polizaId, q.cuotaNum);
+    if (!cuota?.comprobante_url) return res.status(404).json({ message: 'Este pago no tiene comprobante' });
+    // Uses the exact URL Cloudinary returned at upload time (saved on the payment)
+    await pipeStoredPdf(res, cuota.comprobante_url, comprobantePublicId(cuota.candidate_id, q.polizaId, q.cuotaNum));
+  } catch (err) {
+    console.error('STREAM SEGURO PAGO DOC ERROR:', err);
+    if (!res.headersSent) res.status(500).json({ message: 'Error al abrir el comprobante' });
+  }
+};
+
+// DELETE /api/upload/seguro-pago-doc?polizaId&cuotaNum
+export const deleteSeguroPagoDoc = async (req, res) => {
+  if (!req.session?.user) return res.status(401).json({ message: 'Not authenticated' });
+  const q = parseCuotaQuery(req.query);
+  if (!q) return res.status(400).json({ message: 'polizaId y cuotaNum son obligatorios' });
+  try {
+    const cuota = await findCuota(q.polizaId, q.cuotaNum);
+    if (!cuota) return res.status(404).json({ message: 'Cuota no encontrada' });
+    await destroyComprobante(cuota.candidate_id, q.polizaId, q.cuotaNum, cuota.comprobante_url);
+    await pool.query(
+      'UPDATE sort_ges_seguro_mat_cuotas SET comprobante_url = NULL WHERE seguro_mat_id = ? AND cuota_num = ?',
+      [q.polizaId, q.cuotaNum]
+    );
+    await logDelete(req.session.user.id, 'progestor',
+      `Eliminó comprobante de pago cuota ${q.cuotaNum} póliza #${q.polizaId}`, new Date(), `${q.polizaId}`);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('DELETE SEGURO PAGO DOC ERROR:', err);
+    res.status(500).json({ message: 'Error al eliminar el comprobante' });
+  }
+};
+
+// ── Sort_IPS profile photo signature ─────────────────────────
+// GET /api/upload/ip-cloudinary-signature?ipId — same settings as the Sort_GESCA photo
+// (300×300, face crop); one file per IP, overwritten on change.
+export const getIpUploadSignature = async (req, res) => {
+  if (!req.session?.user) return res.status(401).json({ message: 'Not authenticated' });
+  const ipId = Number(req.query.ipId);
+  if (!Number.isInteger(ipId) || ipId <= 0) return res.status(400).json({ message: 'ipId is required' });
+  try {
+    const [rows] = await pool.query('SELECT id FROM sort_ip_candidates WHERE id = ?', [ipId]);
+    if (!rows.length) return res.status(404).json({ message: 'Registro IP no encontrado' });
+    const timestamp = Math.round(Date.now() / 1000);
+    const folder    = 'sort-ip-candidates';
+    const publicId  = `ip_${ipId}`;
+    const signature = cloudinary.utils.api_sign_request(
+      {
+        timestamp,
+        public_id:      publicId,
+        asset_folder:   folder,
+        overwrite:      true,
+        transformation: 'c_fill,w_300,h_300,g_face',
+      },
+      process.env.CLOUDINARY_API_SECRET
+    );
+    res.json({
+      timestamp, signature, publicId,
+      assetFolder: folder,
+      cloudName: process.env.CLOUDINARY_CLOUD_NAME,
+      apiKey:    process.env.CLOUDINARY_API_KEY,
+    });
+  } catch (err) {
+    console.error('IP SIGNATURE ERROR:', err);
+    res.status(500).json({ message: 'Signature generation failed' });
+  }
+};
+
+// ═════════════════════════════════════════════════════════════
+// Sort_IPS documents (PDF): Check list items, Crio embrio results…
+// Stored in section "docs" — see services/ipDocs.js
+// ═════════════════════════════════════════════════════════════
+const parseIpDoc = (src) => {
+  const ipId = Number(src.ipId);
+  const docKey = String(src.docKey || '');
+  return Number.isInteger(ipId) && ipId > 0 && DOC_KEY_REGEX.test(docKey) ? { ipId, docKey } : null;
+};
+
+// GET /api/upload/ip-doc-signature?ipId&docKey
+export const getIpDocSignature = async (req, res) => {
+  if (!req.session?.user) return res.status(401).json({ message: 'Not authenticated' });
+  const q = parseIpDoc(req.query);
+  if (!q) return res.status(400).json({ message: 'ipId y docKey son obligatorios' });
+  try {
+    if (!(await ipExists(q.ipId))) return res.status(404).json({ message: 'Registro IP no encontrado' });
+    const timestamp = Math.round(Date.now() / 1000);
+    const folder    = ipDocFolder(q.ipId);
+    const publicId  = ipDocPublicId(q.ipId, q.docKey);
+    const signature = cloudinary.utils.api_sign_request(
+      { timestamp, public_id: publicId, asset_folder: folder, overwrite: true },
+      process.env.CLOUDINARY_API_SECRET
+    );
+    res.json({
+      timestamp, signature, publicId,
+      assetFolder: folder,
+      cloudName: process.env.CLOUDINARY_CLOUD_NAME,
+      apiKey:    process.env.CLOUDINARY_API_KEY,
+    });
+  } catch (err) {
+    console.error('IP DOC SIGNATURE ERROR:', err);
+    res.status(500).json({ message: 'Signature generation failed' });
+  }
+};
+
+// PUT /api/upload/ip-doc  { ipId, docKey, url } — saves the uploaded file
+export const saveIpDoc = async (req, res) => {
+  if (!req.session?.user) return res.status(401).json({ message: 'Not authenticated' });
+  const q = parseIpDoc(req.body || {});
+  const url = String(req.body?.url || '');
+  if (!q) return res.status(400).json({ message: 'ipId y docKey son obligatorios' });
+  if (!url.startsWith(`https://res.cloudinary.com/${process.env.CLOUDINARY_CLOUD_NAME}/`)) {
+    return res.status(400).json({ message: 'URL de documento inválida' });
+  }
+  try {
+    if (!(await ipExists(q.ipId))) return res.status(404).json({ message: 'Registro IP no encontrado' });
+    const docs = await writeDoc(q.ipId, q.docKey, { url, uploaded_at: new Date().toISOString() }, req.session.user.id);
+    await logUpdate(req.session.user.id, 'babysite', `Subió documento "${q.docKey}" de Sort_IPS #${q.ipId}`, new Date(), `${q.ipId}`);
+    res.json({ success: true, docs });
+  } catch (err) {
+    console.error('SAVE IP DOC ERROR:', err);
+    res.status(500).json({ message: 'Error al guardar el documento' });
+  }
+};
+
+// GET /api/upload/ip-doc-stream?ipId&docKey — opens the PDF
+export const streamIpDoc = async (req, res) => {
+  if (!req.session?.user) return res.status(401).json({ message: 'Not authenticated' });
+  const q = parseIpDoc(req.query);
+  if (!q) return res.status(400).json({ message: 'ipId y docKey son obligatorios' });
+  try {
+    const doc = (await readDocs(q.ipId))[q.docKey];
+    if (!doc?.url) return res.status(404).json({ message: 'Este documento no se ha subido' });
+    await pipeStoredPdf(res, doc.url, ipDocPublicId(q.ipId, q.docKey));
+  } catch (err) {
+    console.error('STREAM IP DOC ERROR:', err);
+    if (!res.headersSent) res.status(500).json({ message: 'Error al abrir el documento' });
+  }
+};
+
+// DELETE /api/upload/ip-doc?ipId&docKey
+export const deleteIpDoc = async (req, res) => {
+  if (!req.session?.user) return res.status(401).json({ message: 'Not authenticated' });
+  const q = parseIpDoc(req.query);
+  if (!q) return res.status(400).json({ message: 'ipId y docKey son obligatorios' });
+  try {
+    const doc = (await readDocs(q.ipId))[q.docKey];
+    if (doc?.url) await destroyIpDoc(q.ipId, q.docKey, doc.url);
+    const docs = await writeDoc(q.ipId, q.docKey, null, req.session.user.id);
+    await logDelete(req.session.user.id, 'babysite', `Eliminó documento "${q.docKey}" de Sort_IPS #${q.ipId}`, new Date(), `${q.ipId}`);
+    res.json({ success: true, docs });
+  } catch (err) {
+    console.error('DELETE IP DOC ERROR:', err);
+    res.status(500).json({ message: 'Error al eliminar el documento' });
   }
 };

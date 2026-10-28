@@ -1,5 +1,6 @@
 import pool from '../db.js';
 import { logUpdate, logCreate, logDelete } from '../services/activityLogger.js';
+import { pushGuestToIp } from '../services/ipGuestSync.js';
 
 // Generate the next sequential "Recluta" code for the current year
 // Format: R + YYYY + 3-digit increasing number (e.g. R2026001, R2026002, ...)
@@ -235,12 +236,19 @@ export const updateGuest = async (req, res) => {
 
         const updatedUsername = UpdatedRow[0].username;
 
+        // Two-way sync: name/email/phone also go to the linked Sort_IPS register
+        try {
+            await pushGuestToIp(id, { username, mail, phone }, req.session.user.id);
+        } catch (syncErr) {
+            console.error('GUEST → SORT_IPS SYNC ERROR:', syncErr);
+        }
+
         await logUpdate(
             req.session.user.id,
             'progestor',
             `Actualizó los datos del invitado ${updatedUsername}`,
             today,
-            `${params}`,
+            `${id}`,   // was the list of new values — it included the password
         );
 
         res.json({ success: true });

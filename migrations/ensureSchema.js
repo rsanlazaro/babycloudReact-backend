@@ -175,6 +175,56 @@ export const ensureSchema = async (pool) => {
   }
   });
 
+  // 8. Passport = unique id of an IP (no repeated IP registers)
+  await step('sort_ip_candidates.pasaporte', async () => {
+    if (!(await tableExists('sort_ip_candidates'))) return;
+    if (!(await columnExists(pool, 'sort_ip_candidates', 'pasaporte'))) {
+      await pool.query('ALTER TABLE sort_ip_candidates ADD COLUMN pasaporte VARCHAR(30) NULL AFTER nombre_completo');
+      console.log(`${tag} added column sort_ip_candidates.pasaporte`);
+    }
+    if (!(await indexExists(pool, 'sort_ip_candidates', 'uq_sort_ip_pasaporte'))) {
+      // NULLs allowed: IPs registered before this change can get their passport later
+      await pool.query('ALTER TABLE sort_ip_candidates ADD UNIQUE KEY uq_sort_ip_pasaporte (pasaporte)');
+      console.log(`${tag} added unique key sort_ip_candidates.pasaporte`);
+    }
+  });
+
+  // 9. "Valor de alta" of each Seguro de Gastos Médicos Mayores register
+  await step('sort_ges_seguro_mat.valor_alta', async () => {
+    if (!(await tableExists('sort_ges_seguro_mat'))) return;
+    if (!(await columnExists(pool, 'sort_ges_seguro_mat', 'valor_alta'))) {
+      await pool.query('ALTER TABLE sort_ges_seguro_mat ADD COLUMN valor_alta DECIMAL(12,2) NULL AFTER total_estimado');
+      console.log(`${tag} added column sort_ges_seguro_mat.valor_alta`);
+    }
+  });
+
+  // 10. PDF receipt of each registered payment (Seguro de Gastos Médicos Mayores)
+  await step('sort_ges_seguro_mat_cuotas.comprobante_url', async () => {
+    if (!(await tableExists('sort_ges_seguro_mat_cuotas'))) return;
+    if (!(await columnExists(pool, 'sort_ges_seguro_mat_cuotas', 'comprobante_url'))) {
+      await pool.query('ALTER TABLE sort_ges_seguro_mat_cuotas ADD COLUMN comprobante_url VARCHAR(500) NULL');
+      console.log(`${tag} added column sort_ges_seguro_mat_cuotas.comprobante_url`);
+    }
+  });
+
+  // 11. "Concepto de pago" of each registered payment (Seguro de Gastos Médicos Mayores)
+  await step('sort_ges_seguro_mat_cuotas.concepto_pago', async () => {
+    if (!(await tableExists('sort_ges_seguro_mat_cuotas'))) return;
+    if (!(await columnExists(pool, 'sort_ges_seguro_mat_cuotas', 'concepto_pago'))) {
+      await pool.query('ALTER TABLE sort_ges_seguro_mat_cuotas ADD COLUMN concepto_pago VARCHAR(255) NULL');
+      console.log(`${tag} added column sort_ges_seguro_mat_cuotas.concepto_pago`);
+    }
+  });
+
+  // 12. Profile photo of each IP (Sort_IPS), stored on Cloudinary
+  await step('sort_ip_candidates.foto_url', async () => {
+    if (!(await tableExists('sort_ip_candidates'))) return;
+    if (!(await columnExists(pool, 'sort_ip_candidates', 'foto_url'))) {
+      await pool.query('ALTER TABLE sort_ip_candidates ADD COLUMN foto_url VARCHAR(500) NULL');
+      console.log(`${tag} added column sort_ip_candidates.foto_url`);
+    }
+  });
+
   if (failed.length) {
     console.error(`${tag} ⚠ ${failed.length} step(s) failed: ${failed.join(' | ')} — ` +
       'creating registers that use them will fail with 500 until fixed.');

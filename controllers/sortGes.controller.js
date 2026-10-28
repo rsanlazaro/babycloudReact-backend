@@ -9,9 +9,40 @@ import { normalizeCurp, isValidCurp, CURP_FORMAT_MESSAGE, parseSchemeAmount } fr
 import { contractForScheme } from '../services/contracts.js';
 import { JSON_FIELDS as PAYMENTS_JSON_FIELDS } from './paymentsGest.controller.js';
 import { insertCandidate, buildAltaGescaFields } from '../services/sortGesRecords.js';
+import { findConflicts, conflictResponse } from '../services/concurrency.js';
+import { findCuota, destroyComprobante, destroyComprobantesOfPoliza } from '../services/seguroComprobantes.js';
+
+const hasKey = (obj, k) => Object.prototype.hasOwnProperty.call(obj || {}, k);
+const parseLocks = (v) => {
+  if (!v) return {};
+  if (typeof v === 'object') return { ...v };
+  try { return JSON.parse(v) || {}; } catch { return {}; }
+};
+/** Applies { 'section.field': true|false } to a locks map (false removes the lock) */
+const applyLockPatch = (locks, patch) => {
+  const out = { ...locks };
+  Object.entries(patch || {}).forEach(([k, v]) => { if (v) out[k] = true; else delete out[k]; });
+  return out;
+};
 import {
-  computeSolicitud, computeStatusGral, computePago, computeAnio, nextCuota,
+  computeSolicitud, computeStatusGral, computePago, computeAnio, nextCuota, computeAltaSeguro,
 } from '../services/seguroStatus.js';
+
+/** Latest insurance register per candidate (Listado de seguros), keyed by candidate_id */
+async function latestPolicies(candidateIds = null) {
+  const [rows] = await pool.query(
+    `SELECT s.candidate_id, s.fecha_solicitud, s.fecha_alta, s.fecha_liberacion, s.fecha_vencimiento
+       FROM sort_ges_seguro_mat s
+       JOIN (SELECT candidate_id, MAX(id) AS max_id FROM sort_ges_seguro_mat
+              ${candidateIds ? 'WHERE candidate_id IN (?)' : ''}
+              GROUP BY candidate_id) m
+         ON m.max_id = s.id`,
+    candidateIds ? [candidateIds] : []
+  );
+  const byCandidate = {};
+  rows.forEach(r => { byCandidate[r.candidate_id] = r; });
+  return byCandidate;
+}
 
 // ─────────────────────────────────────────────────────────────
 // Helpers
@@ -57,7 +88,9 @@ export const getAllCandidates = async (req, res) => {
        LEFT JOIN sort_ges_checklist ck ON ck.candidate_id = c.id
        ORDER BY c.created_at DESC`
     );
-    res.json(rows);
+    // Admisiones → "Alta seguro", derived from Listado de seguros (rules in services/seguroStatus.js)
+    const policies = await latestPolicies();
+    res.json(rows.map(r => ({ ...r, alta_seguro: computeAltaSeguro(policies[r.id]) })));
   } catch (err) { serverError(res, err, 'getAllCandidates'); }
 };
 
@@ -232,14 +265,18 @@ export const upsertAltaGesca = async (req, res) => {
   if (!requireSession(req, res)) return;
   const { candidateId } = req.params;
   const today = new Date();
-  const fields = buildAltaGescaFields(req.body);
+  const body = req.body || {};
+  const allFields = buildAltaGescaFields(body);   // every column, missing ones as defaults
+  const lockPatch = body.locked_fields_patch;      // { 'section.field': true|false }
 
   try {
     const [existing] = await pool.query(
-      'SELECT id FROM sort_ges_alta_gesca WHERE candidate_id = ?', [candidateId]
+      'SELECT * FROM sort_ges_alta_gesca WHERE candidate_id = ?', [candidateId]
     );
 
     if (existing.length === 0) {
+      const fields = { ...allFields };
+      if (lockPatch) fields.locked_fields = JSON.stringify(applyLockPatch({}, lockPatch));
       const cols = ['candidate_id', ...Object.keys(fields)];
       const placeholders = cols.map(() => '?').join(', ');
       await pool.query(
@@ -251,15 +288,40 @@ export const upsertAltaGesca = async (req, res) => {
         `Creó Alta GESCA para gestante #${candidateId}`, today, `${candidateId}`
       );
     } else {
-      const setClause = Object.keys(fields).map(k => `${k} = ?`).join(', ');
-      await pool.query(
-        `UPDATE sort_ges_alta_gesca SET ${setClause} WHERE candidate_id = ?`,
-        [...Object.values(fields), candidateId]
-      );
-      await logUpdate(
-        req.session.user.id, 'progestor',
-        `Actualizó Alta GESCA de gestante #${candidateId}`, today, `${candidateId}`
-      );
+      const current = existing[0];
+      // Only the columns actually sent — never overwrite fields this client didn't touch
+      const fields = {};
+      Object.keys(allFields).forEach(k => {
+        if (k !== 'locked_fields' && hasKey(body, k)) fields[k] = allFields[k];
+      });
+
+      // Someone else changed one of these fields since this client loaded it?
+      if (body._original && typeof body._original === 'object') {
+        const origT = buildAltaGescaFields(body._original);   // same transforms as the new values
+        const original = {};
+        Object.keys(body._original).forEach(k => { if (hasKey(origT, k)) original[k] = origT[k]; });
+        const conflicts = findConflicts(current, original, fields, ['imc', 'imc_clasificacion', 'locked_fields']);
+        if (conflicts.length) return conflictResponse(res, conflicts, current);
+      }
+
+      // Locks: merged with the stored ones (another user's locks are kept)
+      if (lockPatch && typeof lockPatch === 'object') {
+        fields.locked_fields = JSON.stringify(applyLockPatch(parseLocks(current.locked_fields), lockPatch));
+      } else if (hasKey(body, 'locked_fields')) {
+        fields.locked_fields = allFields.locked_fields;      // legacy full map
+      }
+
+      if (Object.keys(fields).length) {
+        const setClause = Object.keys(fields).map(k => `${k} = ?`).join(', ');
+        await pool.query(
+          `UPDATE sort_ges_alta_gesca SET ${setClause} WHERE candidate_id = ?`,
+          [...Object.values(fields), candidateId]
+        );
+        await logUpdate(
+          req.session.user.id, 'progestor',
+          `Actualizó Alta GESCA de gestante #${candidateId}`, today, `${candidateId}`
+        );
+      }
     }
 
     const [rows] = await pool.query(
@@ -335,6 +397,20 @@ export const upsertChecklist = async (req, res) => {
         `Creó Checklist para gestante #${candidateId}`, today, `${candidateId}`
       );
     } else {
+      if (req.body._original && typeof req.body._original === 'object') {
+        const [[current]] = await pool.query(
+          'SELECT * FROM sort_ges_checklist WHERE candidate_id = ?', [candidateId]
+        );
+        const original = {};
+        Object.keys(req.body._original).forEach(k => {
+          if (ALLOWED.includes(k)) {
+            const v = req.body._original[k];
+            original[k] = BOOL_FIELDS.includes(k) ? (v ? 1 : 0) : (v || null);
+          }
+        });
+        const conflicts = findConflicts(current, original, fields);
+        if (conflicts.length) return conflictResponse(res, conflicts, current);
+      }
       // Partial UPDATE — only the columns in fields
       const setClause = Object.keys(fields).map(k => `${k} = ?`).join(', ');
       await pool.query(
@@ -495,21 +571,75 @@ export const deleteSeguroVidaPago = async (req, res) => {
 // ═════════════════════════════════════════════════════════════
 
 // ═════════════════════════════════════════════════════════════
+// SEND TO LISTADO DE SEGUROS (Sort_GESCA → Admisiones → "Alta seguro" send button)
+// POST /api/sort-ges/:candidateId/seguro-solicitud
+// Creates the gestante's insurance register with no request date yet, so it
+// shows as Solicitud "Pendiente de solicitud" / Status Gral "Sin iniciar".
+// One per gestante from this button: if she already has a register, that one
+// is returned and nothing new is created.
+// ═════════════════════════════════════════════════════════════
+export const sendSeguroSolicitud = async (req, res) => {
+  if (!requireSession(req, res)) return;
+  const { candidateId } = req.params;
+  try {
+    const [cands] = await pool.query(
+      `SELECT c.id, a.nombre_completo
+         FROM sort_ges_candidates c
+         LEFT JOIN sort_ges_alta_gesca a ON a.candidate_id = c.id
+        WHERE c.id = ?`,
+      [candidateId]
+    );
+    if (!cands.length) return notFound(res, 'Candidate');
+
+    const [existing] = await pool.query(
+      'SELECT id FROM sort_ges_seguro_mat WHERE candidate_id = ? ORDER BY id ASC LIMIT 1',
+      [candidateId]
+    );
+    if (existing.length) {
+      const latest = (await latestPolicies([Number(candidateId)]))[candidateId];
+      return res.json({ id: existing[0].id, created: false, alta_seguro: computeAltaSeguro(latest) });
+    }
+
+    // Only the gestante; everything else is captured later (Listado de seguros / Seguro med).
+    const row = await withRequiredDefaults('sort_ges_seguro_mat', { candidate_id: Number(candidateId) });
+    const cols = Object.keys(row);
+    const [result] = await pool.query(
+      `INSERT INTO sort_ges_seguro_mat (${cols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`,
+      Object.values(row)
+    );
+
+    await logCreate(
+      req.session.user.id, 'babysite',
+      `Envió a Listado de seguros a gestante #${candidateId} (${cands[0].nombre_completo || 'sin nombre'})`,
+      new Date(), `${result.insertId}`
+    );
+    res.status(201).json({ id: result.insertId, created: true, alta_seguro: computeAltaSeguro({}) });
+  } catch (err) { serverError(res, err, 'sendSeguroSolicitud'); }
+};
+
+// ═════════════════════════════════════════════════════════════
 // LISTADO DE SEGUROS (Baby site) — all policies of all gestantes
-// GET /api/sort-ges/seguros
+// GET /api/sort-ges/seguros[?candidate_id=N]
 // Same data as each register's "Seguro med" tab, plus computed columns
-// (rules in services/seguroStatus.js).
+// (rules in services/seguroStatus.js). With ?candidate_id only that gestante's
+// registers are returned (used by Sort_GESCA → SEGURO MED).
 // ═════════════════════════════════════════════════════════════
 export const getAllSeguros = async (req, res) => {
   if (!requireSession(req, res)) return;
+  const candidateId = req.query.candidate_id ? Number(req.query.candidate_id) : null;
+  if (req.query.candidate_id && !Number.isInteger(candidateId)) {
+    return res.status(400).json({ message: 'candidate_id inválido' });
+  }
   try {
     const [policies] = await pool.query(
       `SELECT s.id, s.candidate_id, s.aseguradora, s.numero_poliza,
-              s.fecha_solicitud, s.fecha_alta, s.fecha_vencimiento, s.created_at,
+              s.fecha_solicitud, s.fecha_alta, s.fecha_liberacion, s.fecha_vencimiento, s.created_at,
               a.nombre_completo
          FROM sort_ges_seguro_mat s
          LEFT JOIN sort_ges_alta_gesca a ON a.candidate_id = s.candidate_id
-        ORDER BY s.created_at DESC`
+        ${candidateId ? 'WHERE s.candidate_id = ?' : ''}
+        ORDER BY s.created_at DESC`,
+      candidateId ? [candidateId] : []
     );
 
     // All payments in one query (not one per policy)
@@ -544,9 +674,18 @@ export const getAllSeguros = async (req, res) => {
         pago: pago.texto,
         liquidado: pago.liquidado,
         anio: computeAnio(p),
+        // Same state as Admisiones → "Alta seguro"; 'liberada' enables the "Asignar" button
+        alta_seguro: computeAltaSeguro(p),
       };
     }));
   } catch (err) { serverError(res, err, 'getAllSeguros'); }
+};
+
+// "Valor de alta": empty → NULL, otherwise a number (0 is a valid amount)
+const toMoney = (v) => {
+  if (v === undefined || v === null || String(v).trim() === '') return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
 };
 
 export const getSeguroMatList = async (req, res) => {
@@ -573,7 +712,7 @@ export const createSeguroMat = async (req, res) => {
   const { candidateId } = req.params;
   const today = new Date();
   const {
-    aseguradora, numero_poliza, gestor, tipo_pago, valor_cuota, total_estimado,
+    aseguradora, numero_poliza, gestor, tipo_pago, valor_cuota, total_estimado, valor_alta,
     fecha_solicitud, fecha_alta, fecha_liberacion, fecha_vencimiento,
     pagos = [],
   } = req.body;
@@ -582,13 +721,13 @@ export const createSeguroMat = async (req, res) => {
     const [result] = await pool.query(
       `INSERT INTO sort_ges_seguro_mat
          (candidate_id, aseguradora, numero_poliza, gestor, tipo_pago,
-          valor_cuota, total_estimado, fecha_solicitud, fecha_alta,
+          valor_cuota, total_estimado, valor_alta, fecha_solicitud, fecha_alta,
           fecha_liberacion, fecha_vencimiento)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         candidateId,
         aseguradora || null, numero_poliza || null, gestor || null,
-        tipo_pago || null, valor_cuota || null, total_estimado || null,
+        tipo_pago || null, valor_cuota || null, total_estimado || null, toMoney(valor_alta),
         fecha_solicitud || null, fecha_alta || null,
         fecha_liberacion || null, fecha_vencimiento || null,
       ]
@@ -628,7 +767,7 @@ export const updateSeguroMat = async (req, res) => {
   const { id } = req.params;
   const today = new Date();
   const {
-    aseguradora, numero_poliza, gestor, tipo_pago, valor_cuota, total_estimado,
+    aseguradora, numero_poliza, gestor, tipo_pago, valor_cuota, total_estimado, valor_alta,
     fecha_solicitud, fecha_alta, fecha_liberacion, fecha_vencimiento,
     rebuildPagos = false, pagos = [],
   } = req.body;
@@ -637,18 +776,19 @@ export const updateSeguroMat = async (req, res) => {
     await pool.query(
       `UPDATE sort_ges_seguro_mat
        SET aseguradora = ?, numero_poliza = ?, gestor = ?, tipo_pago = ?,
-           valor_cuota = ?, total_estimado = ?, fecha_solicitud = ?,
+           valor_cuota = ?, total_estimado = ?, valor_alta = ?, fecha_solicitud = ?,
            fecha_alta = ?, fecha_liberacion = ?, fecha_vencimiento = ?
        WHERE id = ?`,
       [
         aseguradora || null, numero_poliza || null, gestor || null,
-        tipo_pago || null, valor_cuota || null, total_estimado || null,
+        tipo_pago || null, valor_cuota || null, total_estimado || null, toMoney(valor_alta),
         fecha_solicitud || null, fecha_alta || null,
         fecha_liberacion || null, fecha_vencimiento || null, id,
       ]
     );
 
     if (rebuildPagos && pagos.length > 0) {
+      await destroyComprobantesOfPoliza(id);   // their payments are deleted below
       await pool.query(
         'DELETE FROM sort_ges_seguro_mat_cuotas WHERE seguro_mat_id = ?', [id]
       );
@@ -677,11 +817,19 @@ export const deleteSeguroMat = async (req, res) => {
   const today = new Date();
   const conn = await pool.getConnection();
   try {
+    // Payments with a comprobante — their Cloudinary files are removed once the delete succeeds
+    const [docs] = await conn.query(
+      `SELECT c.cuota_num, c.comprobante_url, s.candidate_id
+         FROM sort_ges_seguro_mat_cuotas c JOIN sort_ges_seguro_mat s ON s.id = c.seguro_mat_id
+        WHERE c.seguro_mat_id = ? AND c.comprobante_url IS NOT NULL`,
+      [id]
+    );
     // Its payments go with it (same transaction: all or nothing)
     await conn.beginTransaction();
     await conn.query('DELETE FROM sort_ges_seguro_mat_cuotas WHERE seguro_mat_id = ?', [id]);
     await conn.query('DELETE FROM sort_ges_seguro_mat WHERE id = ?', [id]);
     await conn.commit();
+    for (const d of docs) await destroyComprobante(d.candidate_id, id, d.cuota_num, d.comprobante_url);
     await logDelete(
       req.session.user.id, 'progestor',
       `Eliminó Seguro Gastos Médicos Mayores #${id}`, today, `${id}`
@@ -699,14 +847,15 @@ export const updateCuotaPago = async (req, res) => {
   if (!requireSession(req, res)) return;
   const { polizaId, cuotaNum } = req.params;
   const today = new Date();
-  const { monto_pago, fecha_pago, status } = req.body;
+  const { monto_pago, fecha_pago, status, concepto_pago } = req.body;
+  const concepto = String(concepto_pago ?? '').trim().slice(0, 255) || null;
 
   try {
     await pool.query(
       `UPDATE sort_ges_seguro_mat_cuotas
-       SET monto_pago = ?, fecha_pago = ?, status = ?
+       SET monto_pago = ?, fecha_pago = ?, status = ?, concepto_pago = ?
        WHERE seguro_mat_id = ? AND cuota_num = ?`,
-      [monto_pago || null, fecha_pago || null, status || 'pendiente', polizaId, cuotaNum]
+      [monto_pago || null, fecha_pago || null, status || 'pendiente', concepto, polizaId, cuotaNum]
     );
     await logUpdate(
       req.session.user.id, 'progestor',
@@ -725,9 +874,12 @@ export const removeCuotaPago = async (req, res) => {
   const { polizaId, cuotaNum } = req.params;
   const today = new Date();
   try {
+    // The payment goes away → so does its comprobante (Cloudinary file + URL)
+    const cuota = await findCuota(polizaId, cuotaNum);
+    if (cuota?.comprobante_url) await destroyComprobante(cuota.candidate_id, polizaId, cuotaNum, cuota.comprobante_url);
     await pool.query(
       `UPDATE sort_ges_seguro_mat_cuotas
-       SET monto_pago = NULL, fecha_pago = NULL, status = 'pendiente'
+       SET monto_pago = NULL, fecha_pago = NULL, status = 'pendiente', comprobante_url = NULL, concepto_pago = NULL
        WHERE seguro_mat_id = ? AND cuota_num = ?`,
       [polizaId, cuotaNum]
     );
@@ -898,6 +1050,16 @@ export const getCitaPreviaList = async (req, res) => {
   } catch (err) { serverError(res, err, 'getCitaPreviaList'); }
 };
 
+// "No acudió" history: array of { fecha_cita, remarcada } stored as JSON text
+const serializeNoAcudio = (v) => {
+  if (!v) return null;
+  const arr = Array.isArray(v) ? v : (() => { try { return JSON.parse(v); } catch { return []; } })();
+  const clean = (arr || [])
+    .filter(e => e && typeof e === 'object')
+    .map(e => ({ fecha_cita: e.fecha_cita || null, remarcada: e.remarcada || null }));
+  return clean.length ? JSON.stringify(clean) : null;
+};
+
 export const createCitaPrevia = async (req, res) => {
   if (!requireSession(req, res)) return;
   const { candidateId } = req.params;
@@ -906,6 +1068,7 @@ export const createCitaPrevia = async (req, res) => {
     sub_tab, motivo, sdg, inicio_tratamiento, final: fechaFinal, diagnostico,
     fecha_cita, dr_tratante, status, comentario_solicitud,
     entrega_resultados, reportes, status_resultados, observaciones,
+    tipo, resolucion, incidencia, no_acudio,
   } = req.body;
 
   if (!sub_tab) {
@@ -917,8 +1080,9 @@ export const createCitaPrevia = async (req, res) => {
       `INSERT INTO sort_ges_cita_previa
          (candidate_id, sub_tab, motivo, sdg, inicio_tratamiento, \`final\`,
           diagnostico, fecha_cita, dr_tratante, status, comentario_solicitud,
-          entrega_resultados, reportes, status_resultados, observaciones)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          entrega_resultados, reportes, status_resultados, observaciones,
+          tipo, resolucion, incidencia, no_acudio)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         candidateId, sub_tab,
         motivo || null, sdg || null,
@@ -927,6 +1091,8 @@ export const createCitaPrevia = async (req, res) => {
         fecha_cita || null, dr_tratante || null, status || null,
         comentario_solicitud || null, entrega_resultados || null,
         reportes || null, status_resultados || null, observaciones || null,
+        tipo === 'laboratorio' ? 'laboratorio' : 'cita',
+        resolucion || null, incidencia || null, serializeNoAcudio(no_acudio),
       ]
     );
     await logCreate(
@@ -948,6 +1114,7 @@ export const updateCitaPrevia = async (req, res) => {
     sub_tab, motivo, sdg, inicio_tratamiento, final: fechaFinal, diagnostico,
     fecha_cita, dr_tratante, status, comentario_solicitud,
     entrega_resultados, reportes, status_resultados, observaciones,
+    tipo, resolucion, incidencia, no_acudio,
   } = req.body;
 
   try {
@@ -956,7 +1123,8 @@ export const updateCitaPrevia = async (req, res) => {
        SET sub_tab = ?, motivo = ?, sdg = ?, inicio_tratamiento = ?, \`final\` = ?,
            diagnostico = ?, fecha_cita = ?, dr_tratante = ?, status = ?,
            comentario_solicitud = ?, entrega_resultados = ?, reportes = ?,
-           status_resultados = ?, observaciones = ?
+           status_resultados = ?, observaciones = ?,
+           tipo = ?, resolucion = ?, incidencia = ?, no_acudio = ?
        WHERE id = ?`,
       [
         sub_tab || null, motivo || null, sdg || null,
@@ -965,6 +1133,8 @@ export const updateCitaPrevia = async (req, res) => {
         fecha_cita || null, dr_tratante || null, status || null,
         comentario_solicitud || null, entrega_resultados || null,
         reportes || null, status_resultados || null, observaciones || null,
+        tipo === 'laboratorio' ? 'laboratorio' : 'cita',
+        resolucion || null, incidencia || null, serializeNoAcudio(no_acudio),
         id,
       ]
     );

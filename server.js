@@ -22,6 +22,7 @@ import cloudIpsRoutes from './routes/cloudIps.routes.js';
 import sortGesRoutes from './routes/sortGes.routes.js';
 import sortIpRoutes from './routes/sortIp.routes.js';
 import pnotesRoutes from './routes/pnotes.routes.js';
+import guestPortalRoutes from './routes/guestPortal.routes.js';
 import pool from './db.js';
 import { ensureSchema } from './migrations/ensureSchema.js';
 
@@ -76,6 +77,16 @@ app.use((req, res, next) => {
   next();
 });
 
+// API data must always be fresh: no browser or proxy (Netlify) may cache it,
+// otherwise another session can keep seeing old data even after reloading.
+app.set('etag', false);
+app.use('/api', (req, res, next) => {
+  res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+  res.set('Pragma', 'no-cache');
+  res.set('Expires', '0');
+  next();
+});
+
 // routes
 app.use('/api/users', userRoutes);
 app.use('/api/guests', guestRoutes);
@@ -88,6 +99,7 @@ app.use('/api/babycloud/ips-register', cloudIpsRoutes);
 app.use('/api/sort-ges', sortGesRoutes);
 app.use('/api/sort-ip', sortIpRoutes);
 app.use('/api/pnotes', pnotesRoutes);
+app.use('/api/guest-portal', guestPortalRoutes);   // IP guests: Inicio → Mis datos
 
 // Serve static files from React build
 app.use(express.static(path.join(__dirname, 'build')));

@@ -24,12 +24,13 @@ export const nextCuota = (cuotas = []) =>
  * Solicitud de seguro (request state) — provisional:
  *   start date (fecha_alta) set → Autorizada
  *   request date set            → Solicitada
- *   otherwise                   → Pendiente
+ *   otherwise                   → Pendiente de solicitud
+ *                                 (e.g. just sent from Sort_GESCA → Admisiones)
  */
 export const computeSolicitud = (p) => {
   if (p.fecha_alta)      return { key: 'autorizada', label: 'Autorizada', color: 'success' };
   if (p.fecha_solicitud) return { key: 'solicitada', label: 'Solicitada', color: 'warning' };
-  return { key: 'pendiente', label: 'Pendiente', color: 'secondary' };
+  return { key: 'pendiente_solicitud', label: 'Pendiente de solicitud', color: 'secondary' };
 };
 
 /**
@@ -67,4 +68,50 @@ export const computePago = (cuotas = []) => {
 export const computeAnio = (p) => {
   const d = asDate(p.fecha_alta) || asDate(p.fecha_solicitud) || asDate(p.created_at);
   return d ? d.getFullYear() : null;
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// "Alta seguro" (Sort_GESCA → Admisiones) — derived from the gestante's latest
+// register in Listado de seguros. Only 'no_enviado' is clickable in the UI.
+//   no register                       → no_enviado        (blue send button)
+//   register, no request date         → enviado           (blue send icon, outline)
+//   request date                      → espera_poliza
+//   start date (fecha_alta)           → fecha_asignacion  (label = the start date)
+//   today ≥ release date              → liberada          (release = start + 93 days
+//                                                          when not captured)
+//   today ≥ expiry date               → asignada
+// ─────────────────────────────────────────────────────────────────────────────
+export const LIBERACION_DAYS = 93;
+
+/** Date | "YYYY-MM-DD" | ISO string → "YYYY-MM-DD" (local date), or null */
+export const ymd = (v) => {
+  if (!v) return null;
+  if (v instanceof Date) {
+    if (Number.isNaN(v.getTime())) return null;
+    return `${v.getFullYear()}-${String(v.getMonth() + 1).padStart(2, '0')}-${String(v.getDate()).padStart(2, '0')}`;
+  }
+  const m = String(v).match(/^(\d{4}-\d{2}-\d{2})/);
+  return m ? m[1] : null;
+};
+
+const addDays = (ymdStr, days) => {
+  const [y, m, d] = ymdStr.split('-').map(Number);
+  return ymd(new Date(y, m - 1, d + days));
+};
+
+export const computeAltaSeguro = (p) => {
+  if (!p) return { key: 'no_enviado' };
+  const hoy  = ymd(new Date());
+  const sol  = ymd(p.fecha_solicitud);
+  const alta = ymd(p.fecha_alta);
+  const venc = ymd(p.fecha_vencimiento);
+  const lib  = ymd(p.fecha_liberacion) || (alta ? addDays(alta, LIBERACION_DAYS) : null);
+
+  if (alta) {
+    if (venc && hoy >= venc) return { key: 'asignada', fecha_alta: alta };
+    if (lib && hoy >= lib)   return { key: 'liberada', fecha_alta: alta };
+    return { key: 'fecha_asignacion', fecha_alta: alta };
+  }
+  if (sol) return { key: 'espera_poliza' };
+  return { key: 'enviado' };
 };
