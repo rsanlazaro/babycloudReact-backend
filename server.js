@@ -23,6 +23,7 @@ import sortGesRoutes from './routes/sortGes.routes.js';
 import sortIpRoutes from './routes/sortIp.routes.js';
 import pnotesRoutes from './routes/pnotes.routes.js';
 import guestPortalRoutes from './routes/guestPortal.routes.js';
+import invoiceHistoryRoutes from './routes/invoiceHistory.routes.js';
 import pool from './db.js';
 import { ensureSchema } from './migrations/ensureSchema.js';
 
@@ -100,6 +101,7 @@ app.use('/api/sort-ges', sortGesRoutes);
 app.use('/api/sort-ip', sortIpRoutes);
 app.use('/api/pnotes', pnotesRoutes);
 app.use('/api/guest-portal', guestPortalRoutes);   // IP guests: Inicio → Mis datos
+app.use('/api/invoice-history', invoiceHistoryRoutes); // Progestor bills: invoice history
 
 // Serve static files from React build
 app.use(express.static(path.join(__dirname, 'build')));

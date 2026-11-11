@@ -225,6 +225,33 @@ export const ensureSchema = async (pool) => {
     }
   });
 
+  // 13. History of the invoices generated in Progestor → Admin → Bills
+  await step('invoice_history', async () => {
+    if (!(await tableExists('invoice_history'))) {
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS invoice_history (
+          id              INT AUTO_INCREMENT PRIMARY KEY,
+          empresa         VARCHAR(30)  NOT NULL,           -- babymedic | nexatravel | travelmedicalcare
+          moneda          VARCHAR(3)   NOT NULL,           -- USD | EUR
+          numero_factura  VARCHAR(60)  NOT NULL,
+          fecha           DATE         NULL,
+          saldo           DECIMAL(12,2) NULL,
+          facturar_a      VARCHAR(255) NOT NULL,
+          pais            VARCHAR(120) NULL,
+          total           DECIMAL(12,2) NULL,
+          datos           LONGTEXT     NULL,               -- JSON: full form (to load it again)
+          veces_generada  INT          NOT NULL DEFAULT 1,
+          created_by      INT NULL,
+          updated_by      INT NULL,
+          created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+          UNIQUE KEY uq_invoice_history (empresa, numero_factura),
+          KEY idx_invoice_history_fecha (empresa, fecha)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+      console.log(`${tag} created table invoice_history`);
+    }
+  });
+
   if (failed.length) {
     console.error(`${tag} ⚠ ${failed.length} step(s) failed: ${failed.join(' | ')} — ` +
       'creating registers that use them will fail with 500 until fixed.');
