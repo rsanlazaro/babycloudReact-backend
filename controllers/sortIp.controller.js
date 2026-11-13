@@ -15,6 +15,10 @@ import { logCreate, logUpdate, logDelete } from '../services/activityLogger.js';
 import { findConflicts, conflictResponse } from '../services/concurrency.js';
 import { guestUpdatesFromAlta, guestUniqueError, applyGuestUpdates } from '../services/ipGuestSync.js';
 import { readDocs, destroyIpDoc } from '../services/ipDocs.js';
+import { CLOUD_VIEW_KEY, isCloudViewEnabled } from '../services/ipCloudView.js';
+import {
+  findGuestByPasaporte, passportMismatchError, newAccountError, insertIpAccount, linkAccount, logAccountCreated,
+} from '../services/ipGuestLink.js';
 
 export const SECTION_KEYS = ['alta', 'checklist', 'crio', 'preparacion', 'programa'];
 
@@ -150,9 +154,14 @@ export const getIp = async (req, res) => {
     // "Contraseña (Guests)" in Alta IP is the linked account's password (only in
     // the single-register response, never in the list)
     ip.guest_password = null;
+    ip.guest_match = null;
     if (ip.guest_id) {
       const [[g]] = await pool.query('SELECT password FROM guests WHERE id = ?', [ip.guest_id]);
       ip.guest_password = g?.password ?? null;
+    } else if (ip.pasaporte) {
+      // Not linked: is there a Guests account (profile IP, free) with the same passport?
+      const g = await findGuestByPasaporte(ip.pasaporte);
+      if (g && !g.sort_ip_id && g.profile === 'ip') ip.guest_match = { id: g.id, username: g.username, mail: g.mail };
     }
     res.json(ip);
   } catch (err) { serverError(res, err, 'getIp'); }
@@ -211,7 +220,7 @@ export const getAvailableGuests = async (req, res) => {
     // (plus, when editing, the account this register already has)
     const except = req.query.except ? Number(req.query.except) : null;
     const [rows] = await pool.query(
-      `SELECT g.id, g.username, g.mail, g.phone, g.profile, g.enabled
+      `SELECT g.id, g.username, g.mail, g.phone, g.pasaporte, g.profile, g.enabled
          FROM guests g
         WHERE (g.profile = 'ip' ${except ? 'OR g.id = (SELECT guest_id FROM sort_ip_candidates WHERE id = ?)' : ''})
           AND NOT EXISTS (
@@ -232,7 +241,12 @@ export const lookupPasaporte = async (req, res) => {
     const pasaporte = normalizePasaporte(req.params.pasaporte);
     if (!PASAPORTE_REGEX.test(pasaporte)) return res.json({ pasaporte, valid: false, ip: null });
     const except = req.query.except ? Number(req.query.except) : null;
-    res.json({ pasaporte, valid: true, ip: await findByPasaporte(pool, pasaporte, except) });
+    // guest → Guests account with this passport ("Nuevo IP" links it instead of creating one)
+    const g = await findGuestByPasaporte(pasaporte);
+    res.json({
+      pasaporte, valid: true, ip: await findByPasaporte(pool, pasaporte, except),
+      guest: g ? { id: g.id, username: g.username, mail: g.mail, phone: g.phone || '', profile: g.profile, linked: !!g.sort_ip_id } : null,
+    });
   } catch (err) { serverError(res, err, 'lookupPasaporte'); }
 };
 
@@ -241,7 +255,9 @@ export const createIp = async (req, res) => {
   if (!requireSession(req, res)) return;
   const nombre = String(req.body.nombre_completo || '').trim();
   const pasaporte = normalizePasaporte(req.body.pasaporte ?? req.body.alta?.pasaporte);
-  const guestId = req.body.guest_id ? Number(req.body.guest_id) : null;
+  let guestId = req.body.guest_id ? Number(req.body.guest_id) : null;
+  // cuenta: { password } → create the IP's Guests account from this data
+  const cuenta = req.body.cuenta && typeof req.body.cuenta === 'object' ? req.body.cuenta : null;
   if (!nombre) return res.status(400).json({ message: 'El nombre del IP es obligatorio' });
   if (!pasaporte) return res.status(400).json({ message: 'El pasaporte es obligatorio' });
   if (!PASAPORTE_REGEX.test(pasaporte)) return res.status(400).json({ message: PASAPORTE_FORMAT_MESSAGE });
@@ -251,12 +267,47 @@ export const createIp = async (req, res) => {
     const dup = await findByPasaporte(pool, pasaporte);
     if (dup) return duplicatePasaporte(res, dup);
 
+    // Link through the passport: an account with the same passport is linked
+    // (never duplicated); a chosen account must not have another passport.
+    const byPassport = await findGuestByPasaporte(pasaporte);
+    if (guestId) {
+      const [[chosen]] = await pool.query('SELECT id, username, pasaporte FROM guests WHERE id = ?', [guestId]);
+      const mismatch = chosen ? passportMismatchError(chosen, pasaporte) : '';
+      if (mismatch) return res.status(409).json({ message: mismatch });
+      if (byPassport && Number(byPassport.id) !== guestId) {
+        return res.status(409).json({ message: `El pasaporte ${pasaporte} ya pertenece a la cuenta de Guests ${byPassport.username}` });
+      }
+    } else if (byPassport) {
+      if (byPassport.sort_ip_id) {
+        return res.status(409).json({ message: `La cuenta de Guests con el pasaporte ${pasaporte} (${byPassport.username}) ya está vinculada a otro registro IP` });
+      }
+      if (byPassport.profile === 'ip') guestId = Number(byPassport.id);
+    }
     const linkErr = await guestLinkError(guestId);
     if (linkErr) return res.status(linkErr.status).json({ message: linkErr.message });
 
+    // New account (only when no account was chosen / found by passport)
+    const createAccount = !guestId && !!cuenta;
+    const accountData = createAccount ? {
+      nombre, pasaporte, password: cuenta.password,
+      email: String(req.body.alta?.email || '').trim(), telefono: String(req.body.alta?.telefono || '').trim(),
+    } : null;
+    if (createAccount) {
+      const accErr = await newAccountError(accountData);
+      if (accErr) return res.status(400).json({ message: accErr, code: 'ACCOUNT_INVALID' });
+    }
+
+    // Alta IP data; with a linked account, its empty email / phone come from the account
+    const alta = { ...(req.body.alta || {}), nombre_completo: nombre, pasaporte };
+    if (guestId) {
+      const [[acc]] = await pool.query('SELECT mail, phone FROM guests WHERE id = ?', [guestId]);
+      if (!String(alta.email || '').trim() && acc?.mail) alta.email = acc.mail;
+      if (!String(alta.telefono || '').trim() && acc?.phone) alta.telefono = acc.phone;
+    }
+
     // Linked Guests account gets the register's name/email/phone (two-way sync)
     const guestUpdates = guestId
-      ? guestUpdatesFromAlta({ ...(req.body.alta || {}), nombre_completo: nombre }, ['nombre_completo', 'email', 'telefono'])
+      ? guestUpdatesFromAlta(alta, ['nombre_completo', 'email', 'telefono'])
       : {};
     const guestErr = guestId ? await guestUniqueError(guestId, guestUpdates) : null;
     if (guestErr) return res.status(409).json(guestErr);
@@ -267,16 +318,22 @@ export const createIp = async (req, res) => {
       [nombre, pasaporte, guestId, req.session.user.id]
     );
     const newId = result.insertId;
-    const alta = { ...(req.body.alta || {}), nombre_completo: nombre, pasaporte };
     await conn.query(
       'INSERT INTO sort_ip_sections (candidate_id, section, data, updated_by) VALUES (?, ?, ?, ?)',
       [newId, 'alta', JSON.stringify(alta), req.session.user.id]
     );
+    if (createAccount) {
+      const newGuestId = await insertIpAccount(accountData, conn);
+      await conn.query('UPDATE sort_ip_candidates SET guest_id = ? WHERE id = ?', [newGuestId, newId]);
+    } else if (guestId) {
+      await conn.query('UPDATE guests SET pasaporte = ? WHERE id = ?', [pasaporte, guestId]); // the link key
+    }
     await conn.commit();
     await applyGuestUpdates(guestId, guestUpdates);
 
     await logCreate(req.session.user.id, 'babysite', `Creó registro Sort_IPS #${newId} (${nombre})`, new Date(), `${newId}`);
-    res.status(201).json({ id: newId });
+    if (createAccount) await logAccountCreated(req.session.user.id, newId, nombre);
+    res.status(201).json({ id: newId, guest_linked: !!guestId, account_created: createAccount });
   } catch (err) {
     await conn.rollback().catch(() => {});
     // Same passport registered by someone else at the same moment → unique index
@@ -308,6 +365,12 @@ export const updateIp = async (req, res) => {
       const guestId = req.body.guest_id ? Number(req.body.guest_id) : null;
       const linkErr = await guestLinkError(guestId, id);
       if (linkErr) return res.status(linkErr.status).json({ message: linkErr.message });
+      if (guestId) {
+        const [[g]] = await pool.query('SELECT username, pasaporte FROM guests WHERE id = ?', [guestId]);
+        const [[cur]] = await pool.query('SELECT pasaporte FROM sort_ip_candidates WHERE id = ?', [id]);
+        const mismatch = passportMismatchError(g, cur?.pasaporte);
+        if (mismatch) return res.status(409).json({ message: mismatch });
+      }
       sets.push('guest_id = ?'); params.push(guestId);
     }
     if ('status' in req.body) { sets.push('status = ?'); params.push(req.body.status || 'activo'); }
@@ -324,6 +387,13 @@ export const updateIp = async (req, res) => {
     }
 
     await pool.query(`UPDATE sort_ip_candidates SET ${sets.join(', ')} WHERE id = ?`, [...params, id]);
+    if (req.body.guest_id) {
+      // The linked account gets the register's passport (link key)
+      await pool.query(
+        'UPDATE guests g JOIN sort_ip_candidates c ON c.id = ? SET g.pasaporte = c.pasaporte WHERE g.id = ? AND c.pasaporte IS NOT NULL',
+        [id, Number(req.body.guest_id)]
+      );
+    }
     if (syncGuestId) await applyGuestUpdates(syncGuestId, guestUpdates);
     await logUpdate(req.session.user.id, 'babysite', `Actualizó registro Sort_IPS #${id}`, new Date(), `${id}`);
     const [rows] = await pool.query(`${SELECT_IPS} WHERE c.id = ?`, [id]);
@@ -425,6 +495,103 @@ export const saveSection = async (req, res) => {
     await logUpdate(req.session.user.id, 'babysite', `Actualizó ${section} de Sort_IPS #${id}`, new Date(), `${id}`);
     res.json({ success: true, section, data });
   } catch (err) { serverError(res, err, 'saveSection'); }
+};
+
+// POST /api/sort-ip/:id/guest-account   { password }
+// Alta IP → "Crear cuenta": creates the IP's Guests account (profile IP) from
+// the SAVED Alta IP data — name, email (their login), phone, passport — and links it.
+export const createGuestAccount = async (req, res) => {
+  if (!requireSession(req, res)) return;
+  const { id } = req.params;
+  try {
+    const [[ip]] = await pool.query('SELECT id, nombre_completo, pasaporte, guest_id FROM sort_ip_candidates WHERE id = ?', [id]);
+    if (!ip) return res.status(404).json({ message: 'Registro IP no encontrado' });
+    if (ip.guest_id) return res.status(409).json({ message: 'Este registro ya tiene una cuenta vinculada' });
+    const match = await findGuestByPasaporte(ip.pasaporte);
+    if (match && !match.sort_ip_id) {
+      return res.status(409).json({ code: 'GUEST_MATCH', message: `Ya existe la cuenta ${match.username} con el pasaporte ${ip.pasaporte}: vincúlala en lugar de crear otra` });
+    }
+    const [rows] = await pool.query("SELECT data FROM sort_ip_sections WHERE candidate_id = ? AND section = 'alta'", [id]);
+    const alta = parseData(rows[0]?.data);
+    const data = {
+      nombre: ip.nombre_completo, email: alta.email, telefono: alta.telefono,
+      pasaporte: ip.pasaporte, password: req.body?.password,
+    };
+    const accErr = await newAccountError(data);
+    if (accErr) return res.status(400).json({ message: accErr, code: 'ACCOUNT_INVALID' });
+    const guestId = await insertIpAccount(data);
+    await linkAccount(id, guestId, req.session.user.id);
+    await logAccountCreated(req.session.user.id, id, ip.nombre_completo);
+    res.status(201).json({ success: true, guest_id: guestId });
+  } catch (err) { serverError(res, err, 'createGuestAccount'); }
+};
+
+// POST /api/sort-ip/:id/link-guest
+// Alta IP → "Vincular": links the Guests account that has the same passport.
+export const linkGuestByPasaporte = async (req, res) => {
+  if (!requireSession(req, res)) return;
+  const { id } = req.params;
+  try {
+    const [[ip]] = await pool.query('SELECT id, nombre_completo, pasaporte, guest_id FROM sort_ip_candidates WHERE id = ?', [id]);
+    if (!ip) return res.status(404).json({ message: 'Registro IP no encontrado' });
+    if (ip.guest_id) return res.status(409).json({ message: 'Este registro ya tiene una cuenta vinculada' });
+    const g = await findGuestByPasaporte(ip.pasaporte);
+    if (!g) return res.status(404).json({ message: `No hay ninguna cuenta de Guests con el pasaporte ${ip.pasaporte}` });
+    if (g.sort_ip_id) return res.status(409).json({ message: `La cuenta ${g.username} ya está vinculada a otro registro IP` });
+    if (g.profile !== 'ip') return res.status(400).json({ message: `La cuenta ${g.username} no tiene perfil IP` });
+    await linkAccount(id, g.id, req.session.user.id);
+    await logUpdate(req.session.user.id, 'babysite', `Vinculó por pasaporte la cuenta ${g.username} con Sort_IPS #${id} (${ip.nombre_completo})`, new Date(), `${id}`);
+    res.json({ success: true, guest_id: g.id });
+  } catch (err) { serverError(res, err, 'linkGuestByPasaporte'); }
+};
+
+// GET /api/sort-ip/cloud-views
+// Baby Cloud → Cloud IPS list: "Vista" of every Guests account linked to a
+// Sort_IPS register → [{ guest_id, ip_id, nombre_completo, enabled }]
+export const getCloudViews = async (req, res) => {
+  if (!requireSession(req, res)) return;
+  try {
+    const [rows] = await pool.query(
+      `SELECT c.id AS ip_id, c.guest_id, c.nombre_completo, s.data
+         FROM sort_ip_candidates c
+         LEFT JOIN sort_ip_sections s ON s.candidate_id = c.id AND s.section = 'alta'
+        WHERE c.guest_id IS NOT NULL`
+    );
+    res.json(rows.map(r => ({
+      guest_id: r.guest_id, ip_id: r.ip_id, nombre_completo: r.nombre_completo, enabled: isCloudViewEnabled(r.data),
+    })));
+  } catch (err) { serverError(res, err, 'getCloudViews'); }
+};
+
+// PUT /api/sort-ip/:id/cloud-view   body: { enabled: boolean }
+// Alta IP → "Vista en Baby Cloud": lets the IP open (or not) their register in
+// Baby Cloud. Saved at once in the Alta IP data (only this key is touched).
+export const setCloudView = async (req, res) => {
+  if (!requireSession(req, res)) return;
+  const { id } = req.params;
+  if (typeof req.body?.enabled !== 'boolean') return res.status(400).json({ message: 'Valor inválido' });
+  const enabled = req.body.enabled;
+  try {
+    const [ips] = await pool.query('SELECT id, nombre_completo FROM sort_ip_candidates WHERE id = ?', [id]);
+    if (!ips.length) return res.status(404).json({ message: 'Registro IP no encontrado' });
+
+    const [rows] = await pool.query(
+      "SELECT data FROM sort_ip_sections WHERE candidate_id = ? AND section = 'alta'", [id]
+    );
+    const data = { ...parseData(rows[0]?.data), [CLOUD_VIEW_KEY]: enabled };
+    await pool.query(
+      `INSERT INTO sort_ip_sections (candidate_id, section, data, updated_by)
+       VALUES (?, 'alta', ?, ?)
+       ON DUPLICATE KEY UPDATE data = VALUES(data), updated_by = VALUES(updated_by)`,
+      [id, JSON.stringify(data), req.session.user.id]
+    );
+    await logUpdate(
+      req.session.user.id, 'babysite',
+      `${enabled ? 'Activó' : 'Desactivó'} la vista en Baby Cloud del IP #${id} (${ips[0].nombre_completo})`,
+      new Date(), `${id}`
+    );
+    res.json({ success: true, [CLOUD_VIEW_KEY]: enabled });
+  } catch (err) { serverError(res, err, 'setCloudView'); }
 };
 
 // DELETE /api/sort-ip/:id — sections are removed with it (ON DELETE CASCADE)

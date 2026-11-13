@@ -1,7 +1,7 @@
 // backend/routes/paymentsGest.routes.js
 
 import express from 'express';
-import { getAll, create, getById, update, remove, updateStatus, curpLookup } from '../controllers/paymentsGest.controller.js';
+import { getAll, create, getById, update, remove, updateStatus, curpLookup, addToSortGes } from '../controllers/paymentsGest.controller.js';
 
 const router = express.Router();
 
@@ -17,5 +17,6 @@ router.get('/:id', getById);      // GET    /api/payments-gest/:id
 router.put('/:id', update);        // PUT    /api/payments-gest/:id
 router.delete('/:id', remove);        // DELETE /api/payments-gest/:id
 router.patch('/:id/status', updateStatus);  // PATCH  /api/payments-gest/:id/status
+router.post('/:id/sort-ges', addToSortGes);  // POST   /api/payments-gest/:id/sort-ges (migrate to Sort_GESCA)
 
 export default router;

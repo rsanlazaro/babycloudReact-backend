@@ -96,6 +96,28 @@ const duplicateCurpResponse = (res, existing) =>
   });
 
 /**
+ * CURP → id of its SORT_GES register (the oldest one when there are several).
+ * Compared in JS, normalized, so it doesn't depend on the collation of each table.
+ */
+async function sortGesIdsByCurp() {
+  const [rows] = await pool.query(
+    "SELECT candidate_id, curp FROM sort_ges_alta_gesca WHERE curp IS NOT NULL AND curp <> '' ORDER BY candidate_id ASC"
+  );
+  const map = new Map();
+  rows.forEach(r => {
+    const c = normalizeCurp(r.curp);
+    if (c && !map.has(c)) map.set(c, r.candidate_id);
+  });
+  return map;
+}
+
+/** Adds sort_ges_id (SORT_GES register linked by CURP, or null) to each row. */
+async function withSortGesLink(rows) {
+  const map = await sortGesIdsByCurp();
+  return rows.map(r => ({ ...r, sort_ges_id: map.get(normalizeCurp(r.curp)) || null }));
+}
+
+/**
  * Parse JSON columns back to objects after a SELECT.
  */
 function parseRow(row) {
@@ -171,7 +193,8 @@ export const getAll = async (req, res) => {
     );
 
     res.json({
-      data: rows.map(parseRow),
+      // sort_ges_id → the list shows which schemes still are not in Sort_GESCA
+      data: await withSortGesLink(rows.map(parseRow)),
       pagination: { page, limit, total, pages: Math.ceil(total / limit) },
     });
   } catch (err) {
@@ -200,7 +223,8 @@ export const getById = async (req, res) => {
       return res.status(404).json({ message: 'Esquema no encontrado' });
     }
 
-    res.json(parseRow(rows[0]));
+    const [row] = await withSortGesLink([parseRow(rows[0])]);
+    res.json(row);
   } catch (err) {
     console.error('[paymentsGest] getById error:', err);
     console.error('Error stack:', err.stack);
@@ -489,5 +513,40 @@ export const curpLookup = async (req, res) => {
   } catch (err) {
     console.error('[paymentsGest] curpLookup error:', err);
     res.status(500).json({ message: 'Error al buscar la CURP' });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/payments-gest/:id/sort-ges
+// "Agregar a Sort_GESCA": migrates an existing scheme to SORT_GES (by its saved
+// CURP). If a register with that CURP already exists, it is just linked.
+// ─────────────────────────────────────────────────────────────────────────────
+export const addToSortGes = async (req, res) => {
+  if (!req.session?.user) return res.status(401).json({ message: 'Unauthorized' });
+  try {
+    const { id } = req.params;
+    const [rows] = await pool.execute('SELECT * FROM payments_gest WHERE id = ?', [id]);
+    if (!rows.length) return res.status(404).json({ message: 'Esquema no encontrado' });
+
+    const payment = parseRow(rows[0]);
+    const curp = normalizeCurp(payment.curp);
+    if (!curp) {
+      return res.status(400).json({ message: 'Registra (guarda) la CURP del esquema antes de agregarlo a Sort_GESCA' });
+    }
+    if (!isValidCurp(curp)) return res.status(400).json({ message: CURP_FORMAT_MESSAGE });
+    if (!payment.gesca) return res.status(400).json({ message: 'El esquema no tiene nombre de GESCA' });
+
+    const sortGes = await ensureCandidateForPayment(payment, req.session.user.id);
+    res.status(sortGes.created ? 201 : 200).json({
+      id: sortGes.id,
+      created: sortGes.created,
+      nombre_completo: payment.gesca,
+      message: sortGes.created
+        ? 'Registro creado en Sort_GESCA con los datos del esquema'
+        : 'Ya existía un registro en Sort_GESCA con esta CURP; quedó vinculado',
+    });
+  } catch (err) {
+    console.error('[paymentsGest] addToSortGes error:', err);
+    res.status(500).json({ message: 'No se pudo crear el registro en Sort_GESCA' });
   }
 };

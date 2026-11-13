@@ -1,4 +1,5 @@
 import pool from '../db.js';
+import { guestCloudView, CLOUD_VIEW_DISABLED_MESSAGE } from '../services/ipCloudView.js';
 
 // ─── Table map ────────────────────────────────────────────────────────────────
 const TABLES = {
@@ -73,11 +74,6 @@ function tableForCol(stageId, col) {
 }
 
 const isValidId    = (id)  => Number.isInteger(Number(id)) && Number(id) > 0;
-
-// Read access: any logged-in user, or a guest viewing ONLY their own register
-const canReadRegister = (session, guestId) =>
-  !!session?.user ||
-  (!!session?.guest && Number(session.guest.id) === Number(guestId));
 const isValidStage = (s)   => [1, 2, 3, 4, 5, 6].includes(Number(s));
 
 // ─── GET /api/babycloud/ips-register/:guestId ────────────────────────────────
@@ -86,10 +82,22 @@ const isValidStage = (s)   => [1, 2, 3, 4, 5, 6].includes(Number(s));
 
 export const getRegister = async (req, res) => {
   const { guestId } = req.params;
-  if (!req.session?.user && !req.session?.guest) return res.status(401).json({ message: 'Unauthorized' });
-  if (!canReadRegister(req.session, guestId))   return res.status(403).json({ message: 'Forbidden' });
-
   if (!isValidId(guestId)) return res.status(400).json({ message: 'ID inválido' });
+
+  // Staff (users) see any register. A guest only sees their OWN register, and
+  // only while Sort_IPS → Alta IP → "Vista en Baby Cloud" is active.
+  if (!req.session?.user) {
+    const guest = req.session?.guest;
+    if (!guest) return res.status(401).json({ message: 'Unauthorized' });
+    if (Number(guest.id) !== Number(guestId)) return res.status(403).json({ message: 'Sin acceso a este registro' });
+    try {
+      const view = await guestCloudView(guest.id);
+      if (!view.enabled) return res.status(403).json({ message: CLOUD_VIEW_DISABLED_MESSAGE, code: 'CLOUD_VIEW_DISABLED' });
+    } catch (err) {
+      console.error('getRegister cloud view check error:', err);
+      return res.status(500).json({ message: 'Error del servidor' });
+    }
+  }
 
   try {
     const fields = {};

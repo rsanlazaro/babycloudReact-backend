@@ -1,7 +1,18 @@
 import pool from '../db.js';
 import { logUpdate, logCreate, logDelete } from '../services/activityLogger.js';
 import { pushGuestToIp } from '../services/ipGuestSync.js';
+import {
+    normalizeGuestPasaporte, GUEST_PASAPORTE_REGEX, findGuestByPasaporte, autoLinkGuestByPasaporte,
+} from '../services/ipGuestLink.js';
 
+// Passport of an IP account: the key that links it with its Sort_IPS register.
+// Returns { value } (null = empty) or { error }.
+const parsePasaporte = (raw) => {
+    const value = normalizeGuestPasaporte(raw);
+    if (!value) return { value: null };
+    if (!GUEST_PASAPORTE_REGEX.test(value)) return { error: 'El pasaporte debe tener entre 5 y 20 letras o números' };
+    return { value };
+};
 // Generate the next sequential "Recluta" code for the current year
 // Format: R + YYYY + 3-digit increasing number (e.g. R2026001, R2026002, ...)
 const generateReclutaCode = async () => {
@@ -39,19 +50,24 @@ export const getAllGuests = async (req, res) => {
     }
 
     try {
+        // pasaporte + the Sort_IPS register linked to the account (sort_ip_id / sort_ip_nombre)
         const [rows] = await pool.query(
             `SELECT 
-        id,
-        username,
-        password,
-        mail,
-        profile,
-        phone,
-        codigo,
-        created_on,
-        enabled
-       FROM guests
-       ORDER BY created_on DESC`
+        g.id,
+        g.username,
+        g.password,
+        g.mail,
+        g.profile,
+        g.phone,
+        g.pasaporte,
+        g.codigo,
+        g.created_on,
+        g.enabled,
+        c.id AS sort_ip_id,
+        c.nombre_completo AS sort_ip_nombre
+       FROM guests g
+       LEFT JOIN sort_ip_candidates c ON c.guest_id = g.id
+       ORDER BY g.created_on DESC`
         );
 
         res.json(rows);
@@ -69,6 +85,8 @@ export const createGuest = async (req, res) => {
     }
 
     const { username, email, password, profile, phone } = req.body;
+    const pas = parsePasaporte(req.body.pasaporte);
+    if (pas.error) return res.status(400).json({ message: pas.error });
 
     if (!username || !email || !password || !profile) {
         return res.status(400).json({
@@ -88,6 +106,10 @@ export const createGuest = async (req, res) => {
                 message: 'El invitado o correo ya existe',
             });
         }
+        if (pas.value) {
+            const other = await findGuestByPasaporte(pas.value);
+            if (other) return res.status(409).json({ message: `El pasaporte ${pas.value} ya lo tiene la cuenta ${other.username}` });
+        }
 
         // Auto-generate the Código only for Recluta guests (R + year + 001-999)
         let codigo = null;
@@ -103,13 +125,14 @@ export const createGuest = async (req, res) => {
         password,
         profile,
         phone,
+        pasaporte,
         codigo,
         enabled,
         created_on
       )
-      VALUES (?, ?, ?, ?, ?, ?, 1, NOW())
+      VALUES (?, ?, ?, ?, ?, ?, ?, 1, NOW())
       `,
-            [username, email, password, profile, phone || null, codigo]
+            [username, email, password, profile, phone || null, pas.value, codigo]
         );
 
         const metadata = [username, email, password, profile, phone || null, codigo];
@@ -124,6 +147,7 @@ export const createGuest = async (req, res) => {
         password,
         profile,
         phone,
+        pasaporte,
         codigo,
         enabled,
         created_on
@@ -132,6 +156,13 @@ export const createGuest = async (req, res) => {
       `,
             [result.insertId]
         );
+        // Same passport as a Sort_IPS register without account → linked
+        let link = null;
+        try {
+            link = await autoLinkGuestByPasaporte(result.insertId, req.session.user.id);
+        } catch (linkErr) {
+            console.error('GUEST → SORT_IPS LINK ERROR:', linkErr);
+        }
 
         await logCreate(
             req.session.user.id,
@@ -141,7 +172,11 @@ export const createGuest = async (req, res) => {
             metadata,
         );
 
-        res.status(201).json(newGuest[0]);
+        res.status(201).json({
+            ...newGuest[0],
+            sort_ip_id: link?.ipId || null,
+            sort_ip_nombre: link?.nombre_completo || null,
+        });
     } catch (err) {
         console.error('CREATE GUEST ERROR:', err);
         res.status(500).json({ message: 'Server error' });
@@ -162,6 +197,27 @@ export const updateGuest = async (req, res) => {
         // Build dynamic update query
         const updates = [];
         const params = [];
+        let pasaporteChanged = false;
+        if (req.body.pasaporte !== undefined) {
+            const pas = parsePasaporte(req.body.pasaporte);
+            if (pas.error) return res.status(400).json({ message: pas.error });
+            const [[cur]] = await pool.query(
+                'SELECT g.pasaporte, c.id AS sort_ip_id FROM guests g LEFT JOIN sort_ip_candidates c ON c.guest_id = g.id WHERE g.id = ?',
+                [id]
+            );
+            if (cur?.sort_ip_id && (pas.value || null) !== (cur.pasaporte || null)) {
+                return res.status(400).json({ message: 'Esta cuenta está vinculada a un registro de Sort_IPS: el pasaporte se cambia desde Sort_IPS → Alta IP' });
+            }
+            if (pas.value) {
+                const other = await findGuestByPasaporte(pas.value);
+                if (other && Number(other.id) !== Number(id)) {
+                    return res.status(409).json({ message: `El pasaporte ${pas.value} ya lo tiene la cuenta ${other.username}` });
+                }
+            }
+            updates.push('pasaporte = ?');
+            params.push(pas.value);
+            pasaporteChanged = true;
+        }
 
         if (username !== undefined) {
             // Check if username is taken by another guest
@@ -243,6 +299,16 @@ export const updateGuest = async (req, res) => {
             console.error('GUEST → SORT_IPS SYNC ERROR:', syncErr);
         }
 
+        // New passport (or profile changed to IP) → link with the Sort_IPS register that has it
+        let link = null;
+        if (pasaporteChanged || profile !== undefined) {
+            try {
+                link = await autoLinkGuestByPasaporte(id, req.session.user.id);
+            } catch (linkErr) {
+                console.error('GUEST → SORT_IPS LINK ERROR:', linkErr);
+            }
+        }
+
         await logUpdate(
             req.session.user.id,
             'progestor',
@@ -251,7 +317,7 @@ export const updateGuest = async (req, res) => {
             `${id}`,   // was the list of new values — it included the password
         );
 
-        res.json({ success: true });
+        res.json({ success: true, sort_ip_id: link?.ipId || null, sort_ip_nombre: link?.nombre_completo || null });
     } catch (err) {
         console.error('UPDATE GUEST ERROR:', err);
         res.status(500).json({ message: 'Server error' });

@@ -12,6 +12,7 @@
 import pool from '../db.js';
 import { pushGuestToIp } from '../services/ipGuestSync.js';
 import { guestPasswordError } from './sortIp.controller.js';
+import { guestCloudView } from '../services/ipCloudView.js';
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const clean = (v) => String(v ?? '').trim();
@@ -50,7 +51,9 @@ export const getMe = async (req, res) => {
   try {
     const g = await currentIpGuest(req, res);
     if (!g) return;
-    res.json(publicShape(g, await linkedIp(g.id)));
+    const view = await guestCloudView(g.id);
+    // cloud_view_enabled → "Ver mi registro" available (Sort_IPS → Alta IP → Vista en Baby Cloud)
+    res.json({ ...publicShape(g, await linkedIp(g.id)), cloud_view_enabled: view.enabled });
   } catch (err) {
     console.error('GUEST PORTAL GET ERROR:', err);
     res.status(500).json({ message: 'Error del servidor' });
@@ -115,7 +118,7 @@ export const updateMe = async (req, res) => {
     req.session.guest = { ...req.session.guest, username: changes.username || g.username, email: changes.mail || g.mail };
 
     const [rows] = await pool.query('SELECT id, username, mail, phone, profile FROM guests WHERE id = ?', [g.id]);
-    res.json(publicShape(rows[0], await linkedIp(g.id)));
+    res.json({ ...publicShape(rows[0], await linkedIp(g.id)), cloud_view_enabled: (await guestCloudView(g.id)).enabled });
   } catch (err) {
     console.error('GUEST PORTAL UPDATE ERROR:', err);
     res.status(500).json({ message: 'Error del servidor' });

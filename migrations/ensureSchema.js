@@ -252,6 +252,26 @@ export const ensureSchema = async (pool) => {
     }
   });
 
+  // 14. guests.pasaporte — links a Guests account (profile IP) with its Sort_IPS
+  //     register through the passport number. Accounts already linked get the
+  //     passport of their register.
+  await step('guests.pasaporte', async () => {
+    if (!(await columnExists(pool, 'guests', 'pasaporte'))) {
+      await pool.query('ALTER TABLE guests ADD COLUMN pasaporte VARCHAR(30) NULL');
+      console.log(`${tag} added column guests.pasaporte`);
+    }
+    await pool.query(
+      `UPDATE guests g
+         JOIN sort_ip_candidates c ON c.guest_id = g.id
+          SET g.pasaporte = c.pasaporte
+        WHERE (g.pasaporte IS NULL OR g.pasaporte = '') AND c.pasaporte IS NOT NULL AND c.pasaporte <> ''`
+    );
+    if (!(await indexExists(pool, 'guests', 'uq_guests_pasaporte'))) {
+      await pool.query('ALTER TABLE guests ADD UNIQUE KEY uq_guests_pasaporte (pasaporte)');
+      console.log(`${tag} added unique key guests.pasaporte`);
+    }
+  });
+
   if (failed.length) {
     console.error(`${tag} ⚠ ${failed.length} step(s) failed: ${failed.join(' | ')} — ` +
       'creating registers that use them will fail with 500 until fixed.');

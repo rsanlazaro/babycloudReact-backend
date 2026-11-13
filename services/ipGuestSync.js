@@ -6,6 +6,7 @@
 //   nombre_completo      ↔      username
 //   email                ↔      mail
 //   telefono             ↔      phone
+//   pasaporte            →      pasaporte   (the link key: changed only from Sort_IPS)
 //
 // Rules
 //  - Only the fields that were actually changed are copied to the other side.
@@ -19,7 +20,7 @@ import pool from '../db.js';
 const clean = (v) => String(v ?? '').trim();
 
 /** Sort_IPS alta fields → the Guests columns they map to. */
-export const IP_TO_GUEST = { nombre_completo: 'username', email: 'mail', telefono: 'phone' };
+export const IP_TO_GUEST = { nombre_completo: 'username', email: 'mail', telefono: 'phone', pasaporte: 'pasaporte' };
 
 /**
  * Guests columns to update from Sort_IPS alta data, limited to `changedKeys`.
@@ -38,16 +39,16 @@ export const guestUpdatesFromAlta = (alta, changedKeys) => {
 
 /** 409 payload if another Guests account already uses that username or mail; otherwise null. */
 export const guestUniqueError = async (guestId, updates) => {
-  for (const col of ['username', 'mail']) {
+  for (const col of ['username', 'mail', 'pasaporte']) {
     if (!updates[col]) continue;
     const [rows] = await pool.query(`SELECT id, username FROM guests WHERE ${col} = ? AND id <> ?`, [updates[col], guestId]);
     if (rows.length) {
-      return {
-        code: 'GUEST_DATA_IN_USE',
-        message: col === 'mail'
-          ? `No se guardó: el correo ${updates[col]} ya lo usa otra cuenta de Guests (${rows[0].username}).`
-          : `No se guardó: el nombre "${updates[col]}" ya lo usa otra cuenta de Guests.`,
+      const messages = {
+        mail: `No se guardó: el correo ${updates[col]} ya lo usa otra cuenta de Guests (${rows[0].username}).`,
+        username: `No se guardó: el nombre "${updates[col]}" ya lo usa otra cuenta de Guests.`,
+        pasaporte: `No se guardó: el pasaporte ${updates[col]} ya lo tiene otra cuenta de Guests (${rows[0].username}).`,
       };
+      return { code: 'GUEST_DATA_IN_USE', message: messages[col] };
     }
   }
   return null;
