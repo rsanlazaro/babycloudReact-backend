@@ -36,6 +36,8 @@ export const ENTITY_TYPES = {
  * @param {Object|null} params.metadata - Additional data as JSON (optional)
  * @param {Object} params.req - Express request object (for IP and user agent)
  */
+let warnedNullUser = false;
+
 export const logActivity = async ({
   userId,
   activityType,
@@ -57,7 +59,16 @@ export const logActivity = async ({
 
     return true;
   } catch (error) {
-    // Log error but don't throw - logging shouldn't break main functionality
+    // Log error but don't throw - logging shouldn't break main functionality.
+    // A Baby Cloud action (no user) on a database whose activity_logs.user_id
+    // is still NOT NULL (migration step 16 not applied): one short warning only
+    if (userId == null && error.code === 'ER_BAD_NULL_ERROR') {
+      if (!warnedNullUser) {
+        warnedNullUser = true;
+        console.warn('Activity logging: activity_logs.user_id does not accept NULL yet; Baby Cloud actions are not logged (see ensureSchema step 16)');
+      }
+      return false;
+    }
     console.error('Activity logging error:', error);
     return false;
   }

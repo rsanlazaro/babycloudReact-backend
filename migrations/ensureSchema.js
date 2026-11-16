@@ -272,6 +272,30 @@ export const ensureSchema = async (pool) => {
     }
   });
 
+  // 15. Crio embrio: the egg-donor agency "FM" is now "FF"
+  await step('crio agencia FM → FF', async () => {
+    const [r] = await pool.query(
+      `UPDATE sort_ip_sections
+          SET data = REPLACE(REPLACE(data, '"agencia":"FM"', '"agencia":"FF"'), '"agencia": "FM"', '"agencia": "FF"')
+        WHERE section = 'crio' AND (data LIKE '%"agencia":"FM"%' OR data LIKE '%"agencia": "FM"%')`
+    );
+    if (r.affectedRows) console.log(`${tag} crio agencia FM → FF in ${r.affectedRows} register(s)`);
+  });
+
+  // 16. activity_logs.user_id accepts NULL: actions done by an IP from Baby Cloud
+  //     (Guests account, not a platform user) are logged without a user
+  await step('activity_logs.user_id NULL', async () => {
+    const [[col]] = await pool.query(
+      `SELECT IS_NULLABLE AS nullable, COLUMN_TYPE AS type
+         FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'activity_logs' AND COLUMN_NAME = 'user_id'`
+    );
+    if (col && col.nullable === 'NO') {
+      await pool.query(`ALTER TABLE activity_logs MODIFY user_id ${col.type} NULL`);
+      console.log(`${tag} activity_logs.user_id now accepts NULL (Baby Cloud actions)`);
+    }
+  });
+
   if (failed.length) {
     console.error(`${tag} ⚠ ${failed.length} step(s) failed: ${failed.join(' | ')} — ` +
       'creating registers that use them will fail with 500 until fixed.');

@@ -95,9 +95,10 @@ export const getLogs = async (req, res) => {
       `
       SELECT 
         al.*,
-        u.username
+        -- actions from Baby Cloud (an IP's Guests account) have no platform user
+        COALESCE(u.username, 'Baby Cloud (IP)') AS username
       FROM activity_logs al
-      JOIN users u ON u.id = al.user_id
+      LEFT JOIN users u ON u.id = al.user_id
       ${whereSQL}
       ORDER BY al.created_at DESC
       LIMIT ? OFFSET ?

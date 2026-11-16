@@ -16,6 +16,7 @@ import { findConflicts, conflictResponse } from '../services/concurrency.js';
 import { guestUpdatesFromAlta, guestUniqueError, applyGuestUpdates } from '../services/ipGuestSync.js';
 import { readDocs, destroyIpDoc } from '../services/ipDocs.js';
 import { CLOUD_VIEW_KEY, isCloudViewEnabled } from '../services/ipCloudView.js';
+import { mirrorParejaLink } from '../services/ipPareja.js';
 import {
   findGuestByPasaporte, passportMismatchError, newAccountError, insertIpAccount, linkAccount, logAccountCreated,
 } from '../services/ipGuestLink.js';
@@ -406,6 +407,29 @@ export const updateIp = async (req, res) => {
 //                                           stored tab; refused (409) if another
 //                                           user changed one of them meanwhile
 //   { data: {...} }                        → legacy: replaces the whole tab
+// Egg donors: rows with ip_opcion come from the IP (Baby Cloud → Mis datos) and
+// keep their saved values; a new row cannot claim to be the IP's.
+function protectIpDonors(data, current) {
+  const prev = Array.isArray(current?.egg_donors) ? current.egg_donors : [];
+  const prevIp = prev.filter(d => d?.ip_opcion);
+  const incoming = Array.isArray(data.egg_donors) ? data.egg_donors : prev;
+  const seen = new Set();
+  const list = incoming.filter(d => d && typeof d === 'object').map(d => {
+    if (!d.ip_opcion) return d;
+    const orig = prevIp.find(p => p.id === d.id);
+    if (!orig) { const { ip_opcion, ...rest } = d; return rest; }   // not really the IP's
+    seen.add(orig.id);
+    return orig;
+  });
+  prevIp.forEach(p => { if (!seen.has(p.id)) list.push(p); });     // removed by staff → restored
+  const fenotipo = data.seleccion_donante === 'Fenotipo';
+  data.egg_donors = list.map(d => {
+    if (fenotipo) return { ...d, agencia: 'Fenotipo', catalogo: '' };
+    return d.agencia === 'Fenotipo' && d.catalogo ? { ...d, catalogo: '' } : d;
+  });
+  return data;
+}
+
 export const saveSection = async (req, res) => {
   if (!requireSession(req, res)) return;
   const { id, section } = req.params;
@@ -419,12 +443,19 @@ export const saveSection = async (req, res) => {
     const [exists] = await pool.query('SELECT id FROM sort_ip_candidates WHERE id = ?', [id]);
     if (!exists.length) return res.status(404).json({ message: 'Registro IP no encontrado' });
 
+    // Alta IP: partner ("Linkar pareja") before this save, to keep the link mutual
+    let prevPareja = null;
+    if (section === 'alta') {
+      const [prevRows] = await pool.query("SELECT data FROM sort_ip_sections WHERE candidate_id = ? AND section = 'alta'", [id]);
+      prevPareja = Number(parseData(prevRows[0]?.data).pareja_ip_id) || null;
+    }
+
     let data;
+    const [rows] = await pool.query(
+      'SELECT data FROM sort_ip_sections WHERE candidate_id = ? AND section = ?', [id, section]
+    );
+    const current = parseData(rows[0]?.data);
     if (isObj(changes)) {
-      const [rows] = await pool.query(
-        'SELECT data FROM sort_ip_sections WHERE candidate_id = ? AND section = ?', [id, section]
-      );
-      const current = parseData(rows[0]?.data);
       if (isObj(req.body._original)) {
         const conflicts = findConflicts(current, req.body._original, changes);
         if (conflicts.length) return conflictResponse(res, conflicts, current);
@@ -433,6 +464,10 @@ export const saveSection = async (req, res) => {
     } else {
       data = req.body.data;
     }
+
+    // Crio embrio → egg donors chosen by the IP in Baby Cloud (ip_opcion) cannot be
+    // changed or removed by staff; Selección donante Fenotipo → Agencia Fenotipo
+    if (section === 'crio' && isObj(data)) data = protectIpDonors(data, current);
 
     // Linked Guests account to keep in sync (Alta IP only, see services/ipGuestSync.js)
     let syncGuestId = null;
@@ -457,6 +492,21 @@ export const saveSection = async (req, res) => {
         if (dup) return duplicatePasaporte(res, dup);
       }
       data.pasaporte = pasaporte || '';
+
+      // "Linkar pareja": another IP register (found by passport); its passport is kept with it
+      const parejaId = Number(data.pareja_ip_id) || null;
+      if (parejaId) {
+        if (parejaId === Number(id)) return res.status(400).json({ message: 'Un IP no puede enlazarse consigo mismo' });
+        const [[pareja]] = await pool.query('SELECT id, pasaporte, nombre_completo FROM sort_ip_candidates WHERE id = ?', [parejaId]);
+        if (!pareja) return res.status(400).json({ message: 'El registro IP de la pareja ya no existe' });
+        data.pareja_ip_id = pareja.id;
+        data.pareja_link = pareja.pasaporte || '';
+        data.pareja_ip_nombre = pareja.nombre_completo || '';
+      } else {
+        data.pareja_ip_id = '';
+        data.pareja_link = '';
+        data.pareja_ip_nombre = '';
+      }
 
       // Two-way sync: changed name/email/phone also go to the linked Guests account.
       // Checked here, before anything is written, so both sides never disagree.
@@ -492,6 +542,7 @@ export const saveSection = async (req, res) => {
     );
     await pool.query('UPDATE sort_ip_candidates SET updated_at = CURRENT_TIMESTAMP WHERE id = ?', [id]);
     if (section === 'alta' && syncGuestId) await applyGuestUpdates(syncGuestId, guestUpdates);
+    if (section === 'alta') await mirrorParejaLink(id, data.pareja_ip_id, prevPareja);
     await logUpdate(req.session.user.id, 'babysite', `Actualizó ${section} de Sort_IPS #${id}`, new Date(), `${id}`);
     res.json({ success: true, section, data });
   } catch (err) { serverError(res, err, 'saveSection'); }
@@ -602,6 +653,9 @@ export const deleteIp = async (req, res) => {
   try {
     // Its PDFs are removed from Cloudinary once the delete succeeds
     const docs = await readDocs(id).catch(() => ({}));
+    // Its partner ("Linkar pareja") stops pointing to it
+    const [altaRows] = await pool.query("SELECT data FROM sort_ip_sections WHERE candidate_id = ? AND section = 'alta'", [id]);
+    await mirrorParejaLink(id, null, parseData(altaRows[0]?.data).pareja_ip_id).catch(() => {});
     await conn.beginTransaction();
     await conn.query('DELETE FROM sort_ip_sections WHERE candidate_id = ?', [id]);
     const [r] = await conn.query('DELETE FROM sort_ip_candidates WHERE id = ?', [id]);
